@@ -1,0 +1,151 @@
+import boto3
+import os
+import json
+import time
+
+# AWS Clients
+ec2 = boto3.client('ec2')
+ssm = boto3.client('ssm')
+autoscaling = boto3.client('autoscaling')
+
+def lambda_handler(event, context):
+    try:
+        # Step 1: Fetch the latest AMI ID from SSM Parameter Store
+        print("Fetching latest AMI ID from Parameter Store...")
+        parameter_name = "/ami/linux/test"
+        response = ssm.get_parameter(Name=parameter_name)
+        ami_id = response['Parameter']['Value']
+        print(f"Retrieved AMI ID: {ami_id}")
+
+        # Step 2: Read exclusions and ASG configurations
+        excluded_asgs = os.environ.get("EXCLUDED_ASGS", "").split(",")
+        excluded_instances = os.environ.get("EXCLUDED_INSTANCES", "").split(",")
+        asg_configurations = json.loads(os.environ.get("ASG_CONFIGURATIONS", "{}"))
+
+        # Step 3: Handle Auto Scaling Groups (ASGs)
+        print("Starting ASG updates...")
+        asgs = autoscaling.describe_auto_scaling_groups()
+        for asg in asgs['AutoScalingGroups']:
+            asg_name = asg['AutoScalingGroupName']
+
+            # Skip excluded ASGs
+            if asg_name in excluded_asgs:
+                print(f"Skipping ASG: {asg_name}")
+                continue
+
+            # Check if an Instance Refresh is already in progress
+            refreshes = autoscaling.describe_instance_refreshes(AutoScalingGroupName=asg_name)
+            if any(refresh['Status'] in ['InProgress', 'Pending'] for refresh in refreshes.get('InstanceRefreshes', [])):
+                print(f"Instance Refresh is already in progress for ASG: {asg_name}. Skipping...")
+                continue
+
+            # Apply ASG Configurations
+            if asg_name in asg_configurations:
+                config = asg_configurations[asg_name]
+                autoscaling.update_auto_scaling_group(
+                    AutoScalingGroupName=asg_name,
+                    MinSize=config['min'],
+                    MaxSize=config['max'],
+                    DesiredCapacity=config['desired']
+                )
+                print(f"Updated ASG configuration for {asg_name}: {config}")
+
+            # Update Launch Template with the new AMI
+            if 'LaunchTemplate' in asg:
+                launch_template_id = asg['LaunchTemplate']['LaunchTemplateId']
+                current_version = asg['LaunchTemplate']['Version']
+                print(f"Updating Launch Template for ASG: {asg_name}")
+                response = ec2.create_launch_template_version(
+                    LaunchTemplateId=launch_template_id,
+                    SourceVersion=current_version,
+                    LaunchTemplateData={'ImageId': ami_id}
+                )
+                new_version = response['LaunchTemplateVersion']['VersionNumber']
+                autoscaling.update_auto_scaling_group(
+                    AutoScalingGroupName=asg_name,
+                    LaunchTemplate={'LaunchTemplateId': launch_template_id, 'Version': str(new_version)}
+                )
+                print(f"Launch Template updated to version {new_version}")
+
+            # Start ASG Instance Refresh
+            print(f"Starting instance refresh for ASG: {asg_name}")
+            autoscaling.start_instance_refresh(AutoScalingGroupName=asg_name)
+
+        print("ASG updates completed successfully.")
+
+        # Step 4: Update standalone EC2 instances
+        print("Starting updates for standalone EC2 instances...")
+        response = ec2.describe_instances(
+            Filters=[{"Name": "instance-state-name", "Values": ["running", "pending"]}]
+        )
+
+        for reservation in response['Reservations']:
+            for instance in reservation['Instances']:
+                instance_id = instance['InstanceId']
+
+                # Skip excluded instances
+                if instance_id in excluded_instances:
+                    print(f"Skipping instance: {instance_id}")
+                    continue
+
+                # Fetch attached volumes
+                print(f"Fetching volumes for instance: {instance_id}")
+                volumes = ec2.describe_volumes(Filters=[
+                    {'Name': 'attachment.instance-id', 'Values': [instance_id]}
+                ])
+                volume_data = [(vol['VolumeId'], vol['Attachments'][0]['Device']) for vol in volumes['Volumes']]
+
+                # Terminate instance and launch a new one
+                print(f"Terminating instance: {instance_id}")
+                ec2.terminate_instances(InstanceIds=[instance_id])
+                time.sleep(10)
+
+                print(f"Launching new instance with AMI: {ami_id}")
+                new_instance = ec2.run_instances(
+                    ImageId=ami_id,
+                    MinCount=1,
+                    MaxCount=1,
+                    InstanceType=instance['InstanceType'],
+                    SubnetId=instance['SubnetId'],
+                    SecurityGroupIds=[sg['GroupId'] for sg in instance['SecurityGroups']]
+                )
+                new_instance_id = new_instance['Instances'][0]['InstanceId']
+
+                # Wait for the new instance to reach running state
+                retries = 0
+                max_retries = 3
+                while retries < max_retries:
+                    try:
+                        print(f"Waiting for instance {new_instance_id} to be in 'running' state. Retry {retries+1}/{max_retries}...")
+                        waiter = ec2.get_waiter('instance_running')
+                        waiter.wait(InstanceIds=[new_instance_id], WaiterConfig={'Delay': 15, 'MaxAttempts': 10})
+                        print(f"Instance {new_instance_id} is now running.")
+                        break
+                    except Exception as e:
+                        retries += 1
+                        print(f"Retry {retries}: Error waiting for instance {new_instance_id} to run: {e}")
+                        state = ec2.describe_instances(InstanceIds=[new_instance_id])['Reservations'][0]['Instances'][0]['State']['Name']
+                        print(f"Current state of instance {new_instance_id}: {state}")
+                        if state in ['terminated', 'shutting-down']:
+                            print(f"Instance {new_instance_id} entered terminal state: {state}. Stopping retries.")
+                            break
+
+                if retries < max_retries:
+                    print(f"Instance {new_instance_id} is ready. Proceeding to reattach volumes...")
+                    for volume_id, device_name in volume_data:
+                        print(f"Reattaching volume {volume_id} to instance {new_instance_id} as {device_name}")
+                        ec2.attach_volume(InstanceId=new_instance_id, VolumeId=volume_id, Device=device_name)
+                else:
+                    print(f"Instance {new_instance_id} failed to reach 'running' state. Skipping further actions.")
+
+        print("Standalone EC2 updates completed successfully.")
+        return {
+            "statusCode": 200,
+            "body": "AMI update process completed successfully with ASG and standalone handling."
+        }
+    except Exception as e:
+        print(f"Error in Lambda execution: {e}")
+        return {
+            "statusCode": 500,
+            "body": f"Error: {e}"
+        }
