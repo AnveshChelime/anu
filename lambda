@@ -76,50 +76,54 @@ def lambda_handler(event, context):
     except Exception as e:
         print(f"Failed to update ASGs: {e}")
 
-    # Update standalone EC2 instances
-    try:
-        print("Updating standalone EC2 instances...")
-        standalone_instances = []
-        instances = ec2.describe_instances()
-        for reservation in instances['Reservations']:
-            for instance in reservation['Instances']:
-                instance_id = instance['InstanceId']
-                state = instance['State']['Name']
-
-                # Skip excluded instances and non-running instances
-                if instance_id in static_excluded_instances or state != "running":
-                    print(f"Excluding instance {instance_id} (state: {state})")
-                    continue
-
-                # Check if the instance is part of an ASG
-                tags = {tag['Key']: tag['Value'] for tag in instance.get('Tags', [])}
-                if 'aws:autoscaling:groupName' in tags:
-                    print(f"Skipping ASG-managed instance: {instance_id} (ASG: {tags['aws:autoscaling:groupName']})")
-                    continue
-
-                # Add to the list of standalone instances to update
-                standalone_instances.append(instance_id)
-
-        print(f"Standalone instances to update: {standalone_instances}")
-
-        # Perform updates on standalone instances
-        for instance_id in standalone_instances:
-            print(f"Updating standalone instance: {instance_id} with AMI: {ami_id}")
-            ec2.terminate_instances(InstanceIds=[instance_id])
-            ec2.run_instances(
-                ImageId=ami_id,
-                MinCount=1,
-                MaxCount=1,
-                InstanceType="t2.micro",  # Replace with dynamic instance type if needed
-                SubnetId=instance['SubnetId'],  # Retain network configuration
-                SecurityGroupIds=[sg['GroupId'] for sg in instance['SecurityGroups']]
-            )
-
-        print("Standalone instance refresh completed successfully.")
-    except Exception as e:
-        print(f"Failed to update standalone EC2 instances: {e}")
-
-    return {
-        "statusCode": 200,
-        "body": "AMI update process completed successfully."
-    }
+try:
+    print("Updating standalone EC2 instances...")
+    standalone_instances = []
+    instances = ec2.describe_instances()
+    
+    # Process reservations
+    for reservation in instances.get('Reservations', []):  # Safely access Reservations
+        for instance in reservation.get('Instances', []):  # Safely access Instances
+            instance_id = instance.get('InstanceId')
+            state = instance.get('State', {}).get('Name')
+            
+            # Skip excluded or non-running instances
+            if instance_id in excluded_instances or state != "running":
+                print(f"Excluding instance {instance_id} (state: {state})")
+                continue
+            
+            # Check if the instance is part of an ASG
+            tags = {tag['Key']: tag['Value'] for tag in instance.get('Tags', [])}
+            if 'aws:autoscaling:groupName' in tags:
+                print(f"Skipping ASG-managed instance: {instance_id} (ASG: {tags['aws:autoscaling:groupName']})")
+                continue
+            
+            # Add standalone instance to the list
+            standalone_instances.append(instance)
+    
+    print(f"Standalone instances to update: {standalone_instances}")
+    
+    # Perform updates on standalone instances
+    for instance in standalone_instances:
+        instance_id = instance.get('InstanceId')
+        subnet_id = instance.get('SubnetId')
+        instance_type = instance.get('InstanceType')
+        security_groups = [sg['GroupId'] for sg in instance.get('SecurityGroups', [])]
+        
+        print(f"Updating standalone instance: {instance_id} with AMI: {ami_id}")
+        print(f"Subnet ID: {subnet_id}, Instance Type: {instance_type}, Security Groups: {security_groups}")
+        
+        # Terminate and recreate instance
+        ec2.terminate_instances(InstanceIds=[instance_id])
+        ec2.run_instances(
+            ImageId=ami_id,
+            MinCount=1,
+            MaxCount=1,
+            InstanceType=instance_type,  # Dynamic instance type
+            SubnetId=subnet_id,          # Retain network configuration
+            SecurityGroupIds=security_groups
+        )
+    
+    print("Standalone instance refresh completed successfully.")
+except Exception as e:
+    print(f"Failed to update standalone EC2 instances: {e}")
