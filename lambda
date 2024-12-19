@@ -77,6 +77,15 @@ def lambda_handler(event, context):
                         for volume in volumes_to_reattach[instance_id]:
                             volume_id = volume['VolumeId']
                             device_name = volume['Device']
+
+                            # Highlighted: Check volume state before reattaching
+                            volume_details = ec2.describe_volumes(VolumeIds=[volume_id])
+                            attachment_state = volume_details['Volumes'][0]['Attachments'][0]['State'] if volume_details['Volumes'][0]['Attachments'] else "detached"
+
+                            if attachment_state == "attached":
+                                print(f"Skipping reattachment of volume {volume_id} as it is already attached.")
+                                continue
+
                             try:
                                 print(f"Reattaching volume {volume_id} to instance {instance_id} on device {device_name}...")
                                 ec2.attach_volume(
@@ -150,6 +159,15 @@ def lambda_handler(event, context):
             for volume in volumes['Volumes']:
                 volume_id = volume['VolumeId']
                 device_name = volume['Attachments'][0]['Device']
+
+                # Highlighted: Check volume state before reattaching
+                volume_details = ec2.describe_volumes(VolumeIds=[volume_id])
+                attachment_state = volume_details['Volumes'][0]['Attachments'][0]['State'] if volume_details['Volumes'][0]['Attachments'] else "detached"
+
+                if attachment_state == "attached":
+                    print(f"Skipping reattachment of volume {volume_id} as it is already attached.")
+                    continue
+
                 try:
                     ec2.attach_volume(
                         VolumeId=volume_id,
