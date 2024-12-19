@@ -1,33 +1,32 @@
 import boto3
 import os
 import json
-import time
 
-# AWS clients
+# AWS Clients
 ec2 = boto3.client('ec2')
 ssm = boto3.client('ssm')
 autoscaling = boto3.client('autoscaling')
 
 def lambda_handler(event, context):
-    # Step 1: Fetch the latest AMI ID
+    # Fetch the latest AMI ID from SSM Parameter Store
     try:
         print("Fetching latest AMI ID from Parameter Store...")
-        parameter_name = "/ami/linux/test"
+        parameter_name = "/ami/linux/test"  # Update this if needed
         response = ssm.get_parameter(Name=parameter_name)
         ami_id = response['Parameter']['Value']
         print(f"Retrieved AMI ID: {ami_id}")
     except Exception as e:
-        print(f"Error fetching AMI ID: {e}")
+        print(f"Failed to fetch AMI from Parameter Store: {e}")
         return
 
-    # Step 2: Read exclusions and ASG configurations
+    # Fetch excluded instances and ASGs from environment variables
+    static_excluded_instances = os.environ.get("EXCLUDED_INSTANCES", "").split(",")
     excluded_asgs = os.environ.get("EXCLUDED_ASGS", "").split(",")
-    excluded_instances = os.environ.get("EXCLUDED_INSTANCES", "").split(",")
     asg_configurations = json.loads(os.environ.get("ASG_CONFIGURATIONS", "{}"))
 
-    # Step 3: Update Auto Scaling Groups (ASGs)
+    # Update Auto Scaling Groups (ASGs)
     try:
-        print("Starting ASG updates...")
+        print("Starting Auto Scaling Group updates...")
         asgs = autoscaling.describe_auto_scaling_groups()
         for asg in asgs['AutoScalingGroups']:
             asg_name = asg['AutoScalingGroupName']
@@ -37,101 +36,90 @@ def lambda_handler(event, context):
                 print(f"Skipping ASG: {asg_name}")
                 continue
 
-            # Update ASG Configurations
+            # Apply ASG configurations if defined
             if asg_name in asg_configurations:
                 config = asg_configurations[asg_name]
+                print(f"Updating ASG: {asg_name} with AMI: {ami_id}")
                 autoscaling.update_auto_scaling_group(
                     AutoScalingGroupName=asg_name,
                     MinSize=config['min'],
                     MaxSize=config['max'],
                     DesiredCapacity=config['desired']
                 )
-                print(f"Updated ASG configuration for {asg_name}: {config}")
 
-            # Skip if an Instance Refresh is already in progress
-            refreshes = autoscaling.describe_instance_refreshes(AutoScalingGroupName=asg_name)
-            if refreshes['InstanceRefreshes']:
-                print(f"Instance Refresh already in progress for ASG: {asg_name}. Skipping...")
-                continue
-
-            # Update Launch Template
+            # Update Launch Template for ASG with new AMI
             if 'LaunchTemplate' in asg:
                 launch_template_id = asg['LaunchTemplate']['LaunchTemplateId']
                 current_version = asg['LaunchTemplate']['Version']
+
                 print(f"Updating Launch Template for ASG: {asg_name}")
                 response = ec2.create_launch_template_version(
                     LaunchTemplateId=launch_template_id,
                     SourceVersion=current_version,
-                    LaunchTemplateData={'ImageId': ami_id}
+                    LaunchTemplateData={
+                        'ImageId': ami_id
+                    }
                 )
                 new_version = response['LaunchTemplateVersion']['VersionNumber']
+                print(f"Updated Launch Template version to: {new_version}")
+
+                # Point ASG to the new launch template version
                 autoscaling.update_auto_scaling_group(
                     AutoScalingGroupName=asg_name,
-                    LaunchTemplate={'LaunchTemplateId': launch_template_id, 'Version': str(new_version)}
+                    LaunchTemplate={
+                        'LaunchTemplateId': launch_template_id,
+                        'Version': str(new_version)
+                    }
                 )
-                print(f"Launch Template updated to version {new_version} for {asg_name}")
-
-            # Start Instance Refresh
-            autoscaling.start_instance_refresh(AutoScalingGroupName=asg_name)
-            print(f"Started Instance Refresh for ASG: {asg_name}")
 
         print("ASG updates completed successfully.")
     except Exception as e:
-        print(f"Error updating ASGs: {e}")
+        print(f"Failed to update ASGs: {e}")
 
-    # Step 4: Update standalone EC2 instances
+    # Update standalone EC2 instances
     try:
-        print("Starting updates for standalone EC2 instances...")
-        instances = ec2.describe_instances(Filters=[{'Name': 'instance-state-name', 'Values': ['running']}])
+        print("Updating standalone EC2 instances...")
+        standalone_instances = []
+        instances = ec2.describe_instances()
         for reservation in instances['Reservations']:
             for instance in reservation['Instances']:
                 instance_id = instance['InstanceId']
+                state = instance['State']['Name']
 
-                # Skip excluded instances
-                if instance_id in excluded_instances:
-                    print(f"Skipping instance: {instance_id}")
+                # Skip excluded instances and non-running instances
+                if instance_id in static_excluded_instances or state != "running":
+                    print(f"Excluding instance {instance_id} (state: {state})")
                     continue
 
-                # Capture attached volumes
-                print(f"Fetching volumes for instance: {instance_id}")
-                volumes = ec2.describe_volumes(Filters=[
-                    {'Name': 'attachment.instance-id', 'Values': [instance_id]}
-                ])
-                volume_data = [(vol['VolumeId'], vol['Attachments'][0]['Device']) for vol in volumes['Volumes']]
+                # Check if the instance is part of an ASG
+                tags = {tag['Key']: tag['Value'] for tag in instance.get('Tags', [])}
+                if 'aws:autoscaling:groupName' in tags:
+                    print(f"Skipping ASG-managed instance: {instance_id} (ASG: {tags['aws:autoscaling:groupName']})")
+                    continue
 
-                # Terminate old instance
-                print(f"Terminating instance: {instance_id}")
-                ec2.terminate_instances(InstanceIds=[instance_id])
-                time.sleep(10)
+                # Add to the list of standalone instances to update
+                standalone_instances.append(instance_id)
 
-                # Launch new instance
-                print(f"Launching new instance with AMI: {ami_id}")
-                new_instance = ec2.run_instances(
-                    ImageId=ami_id,
-                    MinCount=1,
-                    MaxCount=1,
-                    InstanceType=instance['InstanceType'],
-                    SubnetId=instance['SubnetId'],
-                    SecurityGroupIds=[sg['GroupId'] for sg in instance['SecurityGroups']]
-                )
-                new_instance_id = new_instance['Instances'][0]['InstanceId']
+        print(f"Standalone instances to update: {standalone_instances}")
 
-                # Wait for the new instance to be in 'running' state
-                print(f"Waiting for instance {new_instance_id} to reach 'running' state...")
-                waiter = ec2.get_waiter('instance_running')
-                waiter.wait(InstanceIds=[new_instance_id], WaiterConfig={'Delay': 15, 'MaxAttempts': 10})
+        # Perform updates on standalone instances
+        for instance_id in standalone_instances:
+            print(f"Updating standalone instance: {instance_id} with AMI: {ami_id}")
+            ec2.terminate_instances(InstanceIds=[instance_id])
+            ec2.run_instances(
+                ImageId=ami_id,
+                MinCount=1,
+                MaxCount=1,
+                InstanceType="t2.micro",  # Replace with dynamic instance type if needed
+                SubnetId=instance['SubnetId'],  # Retain network configuration
+                SecurityGroupIds=[sg['GroupId'] for sg in instance['SecurityGroups']]
+            )
 
-                # Reattach volumes
-                for volume_id, device_name in volume_data:
-                    print(f"Reattaching volume {volume_id} to instance {new_instance_id} as {device_name}")
-                    ec2.attach_volume(InstanceId=new_instance_id, VolumeId=volume_id, Device=device_name)
-
-                print(f"Volumes reattached successfully to instance {new_instance_id}")
-        print("Standalone EC2 updates completed successfully.")
+        print("Standalone instance refresh completed successfully.")
     except Exception as e:
-        print(f"Error updating standalone EC2 instances: {e}")
+        print(f"Failed to update standalone EC2 instances: {e}")
 
     return {
         "statusCode": 200,
-        "body": "AMI update process completed successfully for ASGs and standalone instances."
+        "body": "AMI update process completed successfully."
     }
