@@ -58,27 +58,34 @@ def lambda_handler(event, context):
                     for attachment in volume['Attachments']
                 ]
 
-            # Refresh ASG instances
+            # Start instance refresh for ASG
             print(f"Starting instance refresh for ASG: {asg_name}")
             autoscaling.start_instance_refresh(AutoScalingGroupName=asg_name)
             print(f"Waiting for new instances to be launched in ASG: {asg_name}")
-            time.sleep(60)  # Allow time for refresh
+            time.sleep(120)  # Adjust sleep time based on instance refresh time
 
-            # Reattach captured volumes to new ASG instances
+            # Fetch new instances in the ASG after refresh
+            print(f"Fetching refreshed instances for ASG: {asg_name}")
             refreshed_instances = ec2.describe_instances(Filters=[
                 {'Name': 'tag:aws:autoscaling:groupName', 'Values': [asg_name]},
                 {'Name': 'instance-state-name', 'Values': ['running']}
             ])
+
+            refreshed_mapping = {}
             for reservation in refreshed_instances['Reservations']:
                 for instance in reservation['Instances']:
-                    instance_id = instance['InstanceId']
-                    print(f"Reattaching volumes for refreshed instance: {instance_id} in ASG {asg_name}...")
-                    if instance_id in volumes_to_reattach:
-                        for volume in volumes_to_reattach[instance_id]:
+                    refreshed_mapping[instance['InstanceId']] = instance
+
+            # Reattach captured volumes to new ASG instances
+            for old_instance_id, volumes in volumes_to_reattach.items():
+                for new_instance_id, new_instance in refreshed_mapping.items():
+                    if old_instance_id == new_instance['InstanceId']:  # Ensure correct mapping
+                        print(f"Reattaching volumes for instance: {new_instance_id}")
+                        for volume in volumes:
                             volume_id = volume['VolumeId']
                             device_name = volume['Device']
 
-                            # Highlighted: Check volume state before reattaching
+                            # Check volume state before reattaching
                             volume_details = ec2.describe_volumes(VolumeIds=[volume_id])
                             attachment_state = volume_details['Volumes'][0]['Attachments'][0]['State'] if volume_details['Volumes'][0]['Attachments'] else "detached"
 
@@ -87,14 +94,15 @@ def lambda_handler(event, context):
                                 continue
 
                             try:
-                                print(f"Reattaching volume {volume_id} to instance {instance_id} on device {device_name}...")
+                                print(f"Reattaching volume {volume_id} to instance {new_instance_id} on device {device_name}...")
                                 ec2.attach_volume(
                                     VolumeId=volume_id,
-                                    InstanceId=instance_id,
+                                    InstanceId=new_instance_id,
                                     Device=device_name
                                 )
                             except Exception as e:
-                                print(f"Failed to reattach volume {volume_id} to instance {instance_id}: {e}")
+                                print(f"Failed to reattach volume {volume_id} to instance {new_instance_id}: {e}")
+
         print("ASG updates, refresh, and volume reattachments completed successfully.")
     except Exception as e:
         print(f"Error updating ASGs: {e}")
@@ -159,15 +167,6 @@ def lambda_handler(event, context):
             for volume in volumes['Volumes']:
                 volume_id = volume['VolumeId']
                 device_name = volume['Attachments'][0]['Device']
-
-                # Highlighted: Check volume state before reattaching
-                volume_details = ec2.describe_volumes(VolumeIds=[volume_id])
-                attachment_state = volume_details['Volumes'][0]['Attachments'][0]['State'] if volume_details['Volumes'][0]['Attachments'] else "detached"
-
-                if attachment_state == "attached":
-                    print(f"Skipping reattachment of volume {volume_id} as it is already attached.")
-                    continue
-
                 try:
                     ec2.attach_volume(
                         VolumeId=volume_id,
