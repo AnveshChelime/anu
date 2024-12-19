@@ -184,30 +184,35 @@ def lambda_handler(event, context):
 
             print(f"New instance created with ID: {new_instance_id}")
 
-            # Wait for the new instance to reach the running state
+            # Wait for the new instance to reach running state
             print(f"Waiting for instance {new_instance_id} to reach running state...")
-            waiter = ec2.get_waiter('instance_running')
-            waiter.wait(InstanceIds=[new_instance_id])
+            time.sleep(60)  # Adjust based on instance boot time
+
+            # Verify instance state
+            response = ec2.describe_instances(InstanceIds=[new_instance_id])
+            state = response['Reservations'][0]['Instances'][0]['State']['Name']
+            if state != "running":
+                print(f"Instance {new_instance_id} is in state: {state}. Exiting...")
+                return
             print(f"Instance {new_instance_id} is now running.")
 
-            # Reattach captured volumes to the new instance
-            print(f"Reattaching captured volumes to new instance: {new_instance_id}")
+            # Reattach captured volumes to new instance
             for volume in captured_volumes:
                 volume_id = volume['VolumeId']
                 device_name = volume['Device']
                 try:
+                    print(f"Reattaching volume {volume_id} to instance {new_instance_id} on device {device_name}...")
                     ec2.attach_volume(
                         VolumeId=volume_id,
                         InstanceId=new_instance_id,
                         Device=device_name
                     )
-                    print(f"Successfully reattached volume {volume_id} to instance {new_instance_id} on device {device_name}.")
+                    print(f"Successfully reattached volume {volume_id} to instance {new_instance_id}.")
                 except Exception as e:
                     print(f"Failed to reattach volume {volume_id} to instance {new_instance_id}: {e}")
 
-        except Exception as e:
-            print(f"Failed to recreate standalone instance {instance_id}: {e}")
-except Exception as e:
-    print(f"Failed to update standalone EC2 instances: {e}")
+        print("Standalone instance refresh completed successfully.")
+    except Exception as e:
+        print(f"Failed to update standalone EC2 instances: {e}")
 
 
