@@ -218,3 +218,39 @@ for volume in volumes['Volumes']:
     captured_volumes.append({'VolumeId': volume_id, 'Device': device_name})
     print(f"Captured volume {volume_id} (Device: {device_name}) for instance {instance_id}")
 
+# Recreate instance
+print(f"Recreating standalone instance: {instance_id} with AMI: {ami_id}")
+new_instance = ec2.run_instances(
+    ImageId=ami_id,
+    MinCount=1,
+    MaxCount=1,
+    InstanceType=instance_type,
+    SubnetId=subnet_id,
+    SecurityGroupIds=security_groups
+)['Instances'][0]
+new_instance_id = new_instance['InstanceId']
+")
+
+# Wait for the instance to reach the running state
+print(f"Waiting for instance {new_instance_id} to reach running state...")
+waiter = ec2.get_waiter('instance_running')
+waiter.wait(InstanceIds=[new_instance_id])
+print(f"Instance {new_instance_id} is now running.")
+
+# Reattach captured volumes to the new instance
+print(f"Reattaching captured volumes to new instance: {new_instance_id}")
+for volume in volumes['Volumes']:
+    volume_id = volume['VolumeId']
+    device_name = volume['Attachments'][0]['Device']
+    try:
+        ec2.attach_volume(
+            VolumeId=volume_id,
+            InstanceId=new_instance_id,
+            Device=device_name
+        )
+        print(f"Successfully reattached volume {volume_id} to instance {new_instance_id} on device {device_name}.")
+    except Exception as e:
+        print(f"Failed to reattach volume {volume_id} to instance {new_instance_id}: {e}")
+
+
+
