@@ -165,9 +165,10 @@ def lambda_handler(event, context):
         ec2.terminate_instances(InstanceIds=[instance_id]
         time.sleep(100)
 
-# Recreate standalone instance
-print(f"Recreating standalone instance: {instance_id} with AMI: {ami_id}")
 try:
+    print(f"Recreating standalone instance: {instance_id} with AMI: {ami_id}")
+    print(f"SubnetId: {subnet_id}, SecurityGroups: {security_groups}")
+
     # Create a new instance with the same configuration
     new_instance = ec2.run_instances(
         ImageId=ami_id,
@@ -182,13 +183,14 @@ try:
 
     # Wait for the instance to stabilize
     print(f"Waiting for instance {new_instance_id} to reach running state...")
-    time.sleep(60)  # Adjust sleep as needed
+    time.sleep(60)  # Adjust as needed
 
     # Validate the instance state
     response = ec2.describe_instances(InstanceIds=[new_instance_id])
     state = response['Reservations'][0]['Instances'][0]['State']['Name']
     if state != "running":
-        print(f"Instance {new_instance_id} is in state: {state}. Exiting...")
+        state_reason = response['Reservations'][0]['Instances'][0].get('StateReason', {})
+        print(f"Instance {new_instance_id} is in state: {state}. Termination reason: {state_reason}")
         return
     print(f"Instance {new_instance_id} is now running.")
 
