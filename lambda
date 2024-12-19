@@ -113,16 +113,47 @@ try:
         print(f"Updating standalone instance: {instance_id} with AMI: {ami_id}")
         print(f"Subnet ID: {subnet_id}, Instance Type: {instance_type}, Security Groups: {security_groups}")
         
-        # Terminate and recreate instance
-        ec2.terminate_instances(InstanceIds=[instance_id])
-        ec2.run_instances(
-            ImageId=ami_id,
-            MinCount=1,
-            MaxCount=1,
-            InstanceType=instance_type,  # Dynamic instance type
-            SubnetId=subnet_id,          # Retain network configuration
-            SecurityGroupIds=security_groups
-        )
+# Fetch volumes and device mappings
+volumes = [(vol['Ebs']['VolumeId'], vol['DeviceName']) for vol in instance.get('BlockDeviceMappings', []) if 'Ebs' in vol]
+print(f"Volumes attached to instance {instance_id}: {volumes}")
+
+# Detach volumes
+for volume_id, device_name in volumes:
+    print(f"Detaching volume {volume_id} (Device: {device_name}) from instance {instance_id}...")
+    ec2.detach_volume(VolumeId=volume_id)
+
+# Terminate instance
+print(f"Terminating instance {instance_id}...")
+ec2.terminate_instances(InstanceIds=[instance_id])
+
+# Launch new instance
+print(f"Launching new instance with AMI: {ami_id}")
+new_instance = ec2.run_instances(
+    ImageId=ami_id,
+    MinCount=1,
+    MaxCount=1,
+    InstanceType=instance_type,
+    SubnetId=subnet_id,
+    SecurityGroupIds=security_groups
+)
+new_instance_id = new_instance['Instances'][0]['InstanceId']
+
+# Wait for the instance to be running
+waiter = ec2.get_waiter('instance_running')
+print(f"Waiting for instance {new_instance_id} to reach 'running' state...")
+waiter.wait(InstanceIds=[new_instance_id])
+print(f"Instance {new_instance_id} is now running.")
+
+# Attach volumes to the new instance
+for volume_id, device_name in volumes:
+    print(f"Attaching volume {volume_id} (Device: {device_name}) to instance {new_instance_id}...")
+    ec2.attach_volume(
+        VolumeId=volume_id,
+        InstanceId=new_instance_id,
+        Device=device_name  # Use the original device name
+    )
+print(f"Volumes reattached successfully to instance {new_instance_id}.")
+
     
     print("Standalone instance refresh completed successfully.")
 except Exception as e:
