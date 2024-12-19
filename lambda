@@ -147,50 +147,59 @@ def lambda_handler(event, context):
 
         print(f"Standalone instances to update: {standalone_instances}")
 
-        # Perform updates on standalone instances
-        for instance in standalone_instances:
-            instance_id = instance.get('InstanceId')
-            subnet_id = instance.get('SubnetId')
-            instance_type = instance.get('InstanceType')
-            security_groups = [sg['GroupId'] for sg in instance.get('SecurityGroups', [])]
+ # Perform updates on standalone instances
+for instance in standalone_instances:
+    instance_id = instance.get('InstanceId')
+    subnet_id = instance.get('SubnetId')
+    instance_type = instance.get('InstanceType')
+    security_groups = [sg['GroupId'] for sg in instance.get('SecurityGroups', [])]
 
-            # Capture and reattach volumes
-            volumes = ec2.describe_volumes(Filters=[{'Name': 'attachment.instance-id', 'Values': [instance_id]}])
-            for volume in volumes['Volumes']:
-                for attachment in volume['Attachments']:
-                    volume_id = volume['VolumeId']
-                    device_name = attachment['Device']
+    # Capture volumes
+    volumes = ec2.describe_volumes(Filters=[{'Name': 'attachment.instance-id', 'Values': [instance_id]}])
+    captured_volumes = [
+        {'VolumeId': volume['VolumeId'], 'Device': attachment['Device']}
+        for volume in volumes['Volumes']
+        for attachment in volume['Attachments']
+    ]
+    print(f"Captured volumes for instance {instance_id}: {captured_volumes}")
 
-                    # Check volume state before reattaching
-                    volume_details = ec2.describe_volumes(VolumeIds=[volume_id])
-                    attachment_state = volume_details['Volumes'][0]['Attachments'][0]['State'] if volume_details['Volumes'][0]['Attachments'] else "detached"
+    # Terminate the standalone instance
+    print(f"Terminating standalone instance: {instance_id}")
+    ec2.terminate_instances(InstanceIds=[instance_id])
 
-                    if attachment_state == "attached":
-                        print(f"Skipping reattachment of volume {volume_id} as it is already attached.")
-                        continue
+    # Wait for the instance to terminate (adjust time.sleep or use a wait loop if needed)
+    time.sleep(30)
 
-                    try:
-                        print(f"Reattaching volume {volume_id} to instance {instance_id} on device {device_name}...")
-                        ec2.attach_volume(
-                            VolumeId=volume_id,
-                            InstanceId=instance_id,
-                            Device=device_name
-                        )
-                    except Exception as e:
-                        print(f"Failed to reattach volume {volume_id} to instance {instance_id}: {e}")
+    # Recreate the standalone instance
+    print(f"Recreating standalone instance with AMI: {ami_id}")
+    new_instance = ec2.run_instances(
+        ImageId=ami_id,
+        MinCount=1,
+        MaxCount=1,
+        InstanceType=instance_type,
+        SubnetId=subnet_id,
+        SecurityGroupIds=security_groups
+    )
+    new_instance_id = new_instance['Instances'][0]['InstanceId']
+    print(f"New instance created: {new_instance_id}")
 
-            # Terminate and recreate standalone instance
-            print(f"Updating standalone instance: {instance_id} with AMI: {ami_id}")
-            ec2.terminate_instances(InstanceIds=[instance_id])
-            ec2.run_instances(
-                ImageId=ami_id,
-                MinCount=1,
-                MaxCount=1,
-                InstanceType=instance_type,
-                SubnetId=subnet_id,
-                SecurityGroupIds=security_groups
+    # Wait for the new instance to enter running state
+    print(f"Waiting for new instance {new_instance_id} to enter running state...")
+    waiter = ec2.get_waiter('instance_running')
+    waiter.wait(InstanceIds=[new_instance_id])
+
+    # Reattach captured volumes
+    for volume in captured_volumes:
+        volume_id = volume['VolumeId']
+        device_name = volume['Device']
+        try:
+            print(f"Reattaching volume {volume_id} to instance {new_instance_id} on device {device_name}...")
+            ec2.attach_volume(
+                VolumeId=volume_id,
+                InstanceId=new_instance_id,
+                Device=device_name
             )
+        except Exception as e:
+            print(f"Failed to reattach volume {volume_id} to instance {new_instance_id}: {e}")
 
-        print("Standalone instance refresh completed successfully.")
-    except Exception as e:
-        print(f"Failed to update standalone EC2 instances: {e}")
+print("Standalone instance refresh completed successfully.")
