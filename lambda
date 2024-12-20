@@ -1,127 +1,10 @@
-import boto3
-import os
-import time
-import json
-
-ec2 = boto3.client('ec2')
-autoscaling = boto3.client('autoscaling')
-ssm = boto3.client('ssm')
-
-def lambda_handler(event, context):
-    try:
-        # Fetch AMI ID from SSM Parameter Store
-        parameter_name = "/ami/linux/test"
-        response = ssm.get_parameter(Name=parameter_name)
-        ami_id = response['Parameter']['Value']
-        print(f"Retrieved AMI ID: {ami_id}")
-    except Exception as e:
-        print(f"Failed to fetch AMI from Parameter Store: {e}")
-        return
-
-    # Fetch configurations from environment variables
-    excluded_instances = os.environ.get("EXCLUDED_INSTANCES", "").split(",")
-    excluded_asgs = os.environ.get("EXCLUDED_ASGS", "").split(",")
-    asg_configurations = json.loads(os.environ.get("ASG_CONFIGURATIONS", "{}"))
-
-    try:
-        # Process Auto Scaling Groups (ASG)
-        print("Processing ASGs...")
-        asgs = autoscaling.describe_auto_scaling_groups()['AutoScalingGroups']
-        for asg in asgs:
-            asg_name = asg['AutoScalingGroupName']
-
-            # Skip excluded ASGs
-            if asg_name in excluded_asgs:
-                print(f"Skipping ASG: {asg_name}")
-                continue
-
-            # Update ASG configurations if defined
-            if asg_name in asg_configurations:
-                config = asg_configurations[asg_name]
-                print(f"Updating ASG {asg_name} with configurations: {config}")
-                autoscaling.update_auto_scaling_group(
-                    AutoScalingGroupName=asg_name,
-                    MinSize=config['min'],
-                    MaxSize=config['max'],
-                    DesiredCapacity=config['desired']
-                )
-
-            # Update Launch Template with new AMI
-            if 'LaunchTemplate' in asg:
-                launch_template_id = asg['LaunchTemplate']['LaunchTemplateId']
-                current_version = asg['LaunchTemplate']['Version']
-                print(f"ASG {asg_name} is using Launch Template: {launch_template_id}, Version: {current_version}")
-
-                # Create a new version of the launch template with the new AMI
-                response = ec2.create_launch_template_version(
-                    LaunchTemplateId=launch_template_id,
-                    SourceVersion=current_version,
-                    LaunchTemplateData={'ImageId': ami_id}
-                )
-                new_version = response['LaunchTemplateVersion']['VersionNumber']
-                print(f"Created new Launch Template Version: {new_version} for ASG: {asg_name}")
-
-                # Update the ASG to use the new launch template version
-                autoscaling.update_auto_scaling_group(
-                    AutoScalingGroupName=asg_name,
-                    LaunchTemplate={
-                        'LaunchTemplateId': launch_template_id,
-                        'Version': str(new_version)
-                    }
-                )
-                print(f"Updated ASG {asg_name} to use Launch Template version {new_version}")
-            else:
-                print(f"ASG {asg_name} does not have a Launch Template. Skipping Launch Template update.")
-
-            # Capture volumes for instances in ASG
-            volumes_to_reattach = {}
-            for instance in asg['Instances']:
-                instance_id = instance['InstanceId']
-                print(f"Capturing volumes for instance {instance_id}...")
-                volumes = ec2.describe_volumes(Filters=[{'Name': 'attachment.instance-id', 'Values': [instance_id]}])
-                volumes_to_reattach[instance_id] = [
-                    {'VolumeId': volume['VolumeId'], 'Device': attachment['Device']}
-                    for volume in volumes['Volumes']
-                    for attachment in volume['Attachments']
-                ]
-
-            # Refresh ASG instances
-            print(f"Starting instance refresh for ASG: {asg_name}")
-            autoscaling.start_instance_refresh(AutoScalingGroupName=asg_name)
-            print(f"Waiting for new instances to be launched in ASG: {asg_name}")
-            time.sleep(700)  # Allow time for refresh
-
-            # Reattach captured volumes to new ASG instances
-            refreshed_instances = ec2.describe_instances(Filters=[
-                {'Name': 'tag:aws:autoscaling:groupName', 'Values': [asg_name]},
-                {'Name': 'instance-state-name', 'Values': ['running']}
-            ])
-            for reservation in refreshed_instances['Reservations']:
-                for instance in reservation['Instances']:
-                    instance_id = instance['InstanceId']
-                    print(f"Reattaching volumes for refreshed instance: {instance_id} in ASG {asg_name}...")
-                    if instance_id in volumes_to_reattach:
-                        for volume in volumes_to_reattach[instance_id]:
-                            volume_id = volume['VolumeId']
-                            device_name = volume['Device']
-                            try:
-                                print(f"Reattaching volume {volume_id} to instance {instance_id} on device {device_name}...")
-                                ec2.attach_volume(
-                                    VolumeId=volume_id,
-                                    InstanceId=instance_id,
-                                    Device=device_name
-                                )
-                            except Exception as e:
-                                print(f"Failed to reattach volume {volume_id} to instance {instance_id}: {e}")
-        print("ASG updates, refresh, and volume reattachments completed successfully.")
-    except Exception as e:
-        print(f"Error updating ASGs: {e}")
-
-    try:
+try:
     # Perform updates on standalone instances
     print("Updating standalone EC2 instances...")
     standalone_instances = []
     instances = ec2.describe_instances()
+    
+    # Identify standalone instances
     for reservation in instances.get('Reservations', []):
         for instance in reservation.get('Instances', []):
             instance_id = instance.get('InstanceId')
@@ -132,88 +15,89 @@ def lambda_handler(event, context):
                 print(f"Excluding instance {instance_id} (state: {state})")
                 continue
 
-            # Check if the instance is part of an ASG
+            # Skip ASG-managed instances
             tags = {tag['Key']: tag['Value'] for tag in instance.get('Tags', [])}
             if 'aws:autoscaling:groupName' in tags:
                 print(f"Skipping ASG-managed instance: {instance_id} (ASG: {tags['aws:autoscaling:groupName']})")
                 continue
 
-            # Add standalone instance to the list
+            # Add to standalone list
             standalone_instances.append(instance)
 
-    print(f"Standalone instances to update: {standalone_instances}")
+    print(f"Standalone instances to update: {len(standalone_instances)}")
 
-    # Perform updates on standalone instances
+    # Process standalone instances
     for instance in standalone_instances:
         instance_id = instance['InstanceId']
         subnet_id = instance['SubnetId']
         instance_type = instance['InstanceType']
-        security_groups = [sg['GroupId'] for sg in instance['SecurityGroups']]
+        security_groups = [sg['GroupId'] for sg in instance.get('SecurityGroups', [])]
 
-        # Capture and terminate standalone instance volumes
+        # Capture volumes
+        print(f"Capturing volumes for instance {instance_id}...")
         volumes = ec2.describe_volumes(Filters=[{'Name': 'attachment.instance-id', 'Values': [instance_id]}])
-        captured_volumes = []
-        for volume in volumes['Volumes']:
-            volume_id = volume['VolumeId']
-            device_name = volume['Attachments'][0]['Device']
-            if device_name != '/dev/xvda':  # Exclude root volume
-                captured_volumes.append({'VolumeId': volume_id, 'Device': device_name})
-                print(f"Captured volume {volume_id} (Device: {device_name}) for instance {instance_id}")
+        captured_volumes = [
+            {'VolumeId': volume['VolumeId'], 'Device': attachment['Device']}
+            for volume in volumes['Volumes']
+            for attachment in volume['Attachments']
+            if attachment['Device'] != '/dev/xvda'  # Exclude root volume
+        ]
+        print(f"Captured volumes for {instance_id}: {captured_volumes}")
 
-        # Terminate instance
-        print(f"Terminating standalone instance: {instance_id}")
-        ec2.terminate_instances(InstanceIds=[instance_id]
-        time.sleep(100)
+        # Terminate the old instance
+        print(f"Terminating instance: {instance_id}")
+        ec2.terminate_instances(InstanceIds=[instance_id])
 
-try:
-    print(f"Recreating standalone instance: {instance_id} with AMI: {ami_id}")
-    print(f"SubnetId: {subnet_id}, SecurityGroups: {security_groups}")
+        # Wait for termination to complete
+        print(f"Waiting for instance {instance_id} to terminate...")
+        waiter = ec2.get_waiter('instance_terminated')
+        waiter.wait(InstanceIds=[instance_id])
+        print(f"Instance {instance_id} is terminated.")
 
-    # Create a new instance with the same configuration
-    new_instance = ec2.run_instances(
-        ImageId=ami_id,
-        MinCount=1,
-        MaxCount=1,
-        InstanceType=instance_type,
-        SubnetId=subnet_id,
-        SecurityGroupIds=security_groups
-    )['Instances'][0]
-    new_instance_id = new_instance['InstanceId']
-    print(f"New instance created: {new_instance_id}")
-
-    # Wait for the instance to stabilize
-    print(f"Waiting for instance {new_instance_id} to reach running state...")
-    time.sleep(60)  # Adjust as needed
-
-    # Validate the instance state
-    response = ec2.describe_instances(InstanceIds=[new_instance_id])
-    state = response['Reservations'][0]['Instances'][0]['State']['Name']
-    if state != "running":
-        state_reason = response['Reservations'][0]['Instances'][0].get('StateReason', {})
-        print(f"Instance {new_instance_id} is in state: {state}. Termination reason: {state_reason}")
-        return
-    print(f"Instance {new_instance_id} is now running.")
-
-    # Reattach volumes
-    for volume in volumes['Volumes']:
-        volume_id = volume['VolumeId']
-        device_name = volume['Attachments'][0]['Device']
         try:
-            print(f"Reattaching volume {volume_id} to instance {new_instance_id} on device {device_name}...")
-            ec2.attach_volume(
-                VolumeId=volume_id,
-                InstanceId=new_instance_id,
-                Device=device_name
-            )
+            # Recreate the instance
+            print(f"Recreating standalone instance: {instance_id} with AMI: {ami_id}")
+            print(f"SubnetId: {subnet_id}, SecurityGroups: {security_groups}")
+            new_instance = ec2.run_instances(
+                ImageId=ami_id,
+                MinCount=1,
+                MaxCount=1,
+                InstanceType=instance_type,
+                SubnetId=subnet_id,
+                SecurityGroupIds=security_groups
+            )['Instances'][0]
+            new_instance_id = new_instance['InstanceId']
+            print(f"New instance created: {new_instance_id}")
+
+            # Wait for the new instance to stabilize
+            print(f"Waiting for instance {new_instance_id} to reach running state...")
+            waiter = ec2.get_waiter('instance_running')
+            waiter.wait(InstanceIds=[new_instance_id])
+            print(f"Instance {new_instance_id} is now running.")
+
+            # Validate the instance state
+            response = ec2.describe_instances(InstanceIds=[new_instance_id])
+            state = response['Reservations'][0]['Instances'][0]['State']['Name']
+            if state != "running":
+                state_reason = response['Reservations'][0]['Instances'][0].get('StateReason', {})
+                print(f"Instance {new_instance_id} is in state: {state}. Termination reason: {state_reason}")
+                return
+
+            # Reattach volumes
+            for volume in captured_volumes:
+                volume_id = volume['VolumeId']
+                device_name = volume['Device']
+                try:
+                    print(f"Reattaching volume {volume_id} to instance {new_instance_id} on device {device_name}...")
+                    ec2.attach_volume(
+                        VolumeId=volume_id,
+                        InstanceId=new_instance_id,
+                        Device=device_name
+                    )
+                except Exception as e:
+                    print(f"Failed to reattach volume {volume_id} to instance {new_instance_id}: {e}")
         except Exception as e:
-            print(f"Failed to reattach volume {volume_id} to instance {new_instance_id}: {e}")
+            print(f"Failed to recreate standalone instance {instance_id}: {e}")
 
 except Exception as e:
-    print(f"Failed to recreate standalone instance {instance_id}: {e}")
-
-
-        print("Standalone instance refresh completed successfully.")
-    except Exception as e:
-        print(f"Failed to update standalone EC2 instances: {e}")
-
-
+    print(f"Error updating standalone instances: {e}")
