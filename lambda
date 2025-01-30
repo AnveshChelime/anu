@@ -243,3 +243,110 @@ def lambda_handler(event, context):
         print("Standalone instance refresh completed successfully.")
     except Exception as e:
         print(f"Error updating standalone EC2 instances: {e}")
+
+
+import boto3
+import requests
+import os
+import json
+
+# AWS Clients
+ec2_client = boto3.client("ec2")
+ssm_client = boto3.client("ssm")
+
+# Terraform API Details
+TFC_API_TOKEN = os.environ["TFC_API_TOKEN"]
+ORG_NAME = os.environ["TFC_ORG_NAME"]
+HEADERS = {
+    "Authorization": f"Bearer {TFC_API_TOKEN}",
+    "Content-Type": "application/vnd.api+json",
+}
+
+# Get latest AMI from SSM Parameter Store
+def get_latest_ami():
+    response = ssm_client.get_parameter(Name=os.environ["AMI_PARAMETER_NAME"])
+    return response["Parameter"]["Value"]
+
+# Get EC2 instances running OLD AMI and extract workspace_id
+def get_workspace_ids(old_ami):
+    workspace_ids = set()
+    instances = ec2_client.describe_instances(
+        Filters=[{"Name": "image-id", "Values": [old_ami]}]
+    )
+
+    for reservation in instances["Reservations"]:
+        for instance in reservation["Instances"]:
+            for tag in instance.get("Tags", []):
+                if tag["Key"] == "workspace_id":
+                    workspace_ids.add(tag["Value"])
+
+    return list(workspace_ids)
+
+# Get list of workspaces from Terraform Cloud
+def get_tf_workspaces():
+    response = requests.get(
+        f"https://app.terraform.io/api/v2/organizations/{ORG_NAME}/workspaces",
+        headers=HEADERS,
+    )
+    return response.json()["data"]
+
+# Find matching Terraform workspaces
+def find_matching_workspaces(workspace_ids):
+    workspaces = get_tf_workspaces()
+    return [
+        ws["id"] for ws in workspaces if ws["attributes"]["name"] in workspace_ids
+    ]
+
+# Trigger Terraform Cloud Run
+def trigger_tf_run(workspace_id):
+    payload = {
+        "data": {
+            "attributes": {
+                "message": "AMI update - Triggering ASG refresh",
+                "is-destroy": False
+            },
+            "relationships": {
+                "workspace": {
+                    "data": {
+                        "type": "workspaces",
+                        "id": workspace_id
+                    }
+                }
+            }
+        }
+    }
+    
+    response = requests.post(
+        "https://app.terraform.io/api/v2/runs",
+        headers=HEADERS,
+        json=payload,
+    )
+
+    print(f"Triggered Terraform Run for {workspace_id}: {response.status_code}")
+
+# Lambda Handler Function
+def lambda_handler(event, context):
+    # Get Old AMI from event (EventBridge sends parameter name, fetch previous value)
+    old_ami = event["detail"]["oldValue"]
+    latest_ami = get_latest_ami()
+
+    # Find workspace IDs based on EC2 instances
+    workspace_ids = get_workspace_ids(old_ami)
+
+    if not workspace_ids:
+        print("No matching EC2 instances found for the old AMI.")
+        return
+
+    # Find matching Terraform Cloud Workspaces
+    matching_workspaces = find_matching_workspaces(workspace_ids)
+
+    if not matching_workspaces:
+        print("No matching Terraform Cloud Workspaces found.")
+        return
+
+    # Trigger Terraform runs for each matching workspace
+    for ws_id in matching_workspaces:
+        trigger_tf_run(ws_id)
+
+    return {"statusCode": 200, "body": "Terraform runs triggered successfully."}
+
