@@ -1,0 +1,87 @@
+✅ Step 1: Test API Authentication
+Before making any API calls, ensure your token works by testing authentication.
+
+Run:
+
+sh
+Copy
+Edit
+curl --request GET \
+  --url https://app.terraform.io/api/v2/organizations \
+  --header "Authorization: Bearer $TFC_API_TOKEN" \
+  --header "Content-Type: application/vnd.api+json"
+✅ Expected Output: A JSON response listing Terraform organizations.
+❌ If it fails:
+
+Check if $TFC_API_TOKEN is correctly set (echo $TFC_API_TOKEN).
+Ensure the token has the correct permissions.
+✅ Step 2: List Available Workspaces
+Now, fetch all workspaces under your organization.
+
+Run:
+
+sh
+Copy
+Edit
+curl --request GET \
+  --url "https://app.terraform.io/api/v2/organizations/{your-organization-name}/workspaces" \
+  --header "Authorization: Bearer $TFC_API_TOKEN" \
+  --header "Content-Type: application/vnd.api+json"
+📌 Replace {your-organization-name} with your actual Terraform organization name.
+
+✅ Expected Output: A JSON list of workspaces (with their IDs and names).
+📝 Note down the workspace ID of the one you want to trigger.
+
+✅ Step 3: Manually Trigger a Terraform Cloud Run
+Now, trigger a Terraform workspace run using the workspace ID you retrieved.
+
+Run:
+
+sh
+Copy
+Edit
+curl --request POST \
+  --url https://app.terraform.io/api/v2/runs \
+  --header "Authorization: Bearer $TFC_API_TOKEN" \
+  --header "Content-Type: application/vnd.api+json" \
+  --data '{
+    "data": {
+      "attributes": {
+        "message": "Triggering Terraform run for AMI update",
+        "is-destroy": false
+      },
+      "relationships": {
+        "workspace": {
+          "data": {
+            "type": "workspaces",
+            "id": "your-workspace-id-here"
+          }
+        }
+      }
+    }
+  }'
+📌 Replace "your-workspace-id-here" with the actual Workspace ID.
+
+✅ Expected Output: A response confirming that a new Terraform run has been started.
+
+✅ Step 4: Verify in Terraform Cloud UI
+Go to Terraform Cloud UI → Workspaces → Your Workspace → Runs.
+You should see the new run starting.
+Monitor logs to ensure Terraform is detecting AMI updates.
+✅ Step 5: Automate This in AWS Lambda (Optional)
+If everything works manually, we automate this process using AWS Lambda.
+
+Write a Lambda function that:
+
+Detects AMI updates.
+Fetches EC2 workspace IDs.
+Calls Terraform Cloud API to trigger a run.
+Deploy Lambda and EventBridge:
+
+Lambda listens for SSM Parameter Store AMI updates.
+When AMI changes, it triggers Terraform workspace runs.
+🚀 Final Validation
+Ensure Terraform runs are triggered correctly.
+Verify ASG instance refresh happens automatically.
+Document any issues or gaps in the process.
+Let me know if you need help with automation! 🚀
