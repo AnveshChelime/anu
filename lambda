@@ -345,9 +345,15 @@ def lambda_handler(event, context):
 
     org_name = os.environ["TFC_ORG_NAME"]  # Organization name from Lambda env variables
 
-    # Get Old AMI from event (EventBridge sends parameter name, fetch previous value)
+
+    # Get Old AMI from event
     old_ami = event["detail"].get("oldValue", None)
+    if not old_ami:
+        print("❌ No old AMI value found in event!")
+        return {"statusCode": 400, "body": "No old AMI found in event."}
+
     latest_ami = get_latest_ami()
+    print(f"📢 Old AMI: {old_ami}, New AMI: {latest_ami}")
 
     # Find workspace IDs based on EC2 instances
     workspace_ids = get_workspace_ids(old_ami)
