@@ -280,28 +280,36 @@ def get_workspace_ids(old_ami):
     for reservation in instances["Reservations"]:
         for instance in reservation["Instances"]:
             for tag in instance.get("Tags", []):
-                if tag["Key"] == "workspace_id":
+                if tag["Key"] == "tfc_wsid":  # ✅ Ensure correct tag key
                     workspace_ids.add(tag["Value"])
 
     return list(workspace_ids)
 
 # Get list of workspaces from Terraform Cloud
-def get_tf_workspaces():
+def get_tf_workspaces(api_token, org_name):
+    headers = {
+        "Authorization": f"Bearer {api_token}",
+        "Content-Type": "application/vnd.api+json",
+    }
     response = requests.get(
-        f"https://app.terraform.io/api/v2/organizations/{ORG_NAME}/workspaces",
-        headers=HEADERS,
+        f"https://app.terraform.io/api/v2/organizations/{org_name}/workspaces",
+        headers=headers,
     )
     return response.json()["data"]
 
 # Find matching Terraform workspaces
-def find_matching_workspaces(workspace_ids):
-    workspaces = get_tf_workspaces()
+def find_matching_workspaces(api_token, org_name, workspace_ids):
+    workspaces = get_tf_workspaces(api_token, org_name)
     return [
         ws["id"] for ws in workspaces if ws["attributes"]["name"] in workspace_ids
     ]
 
 # Trigger Terraform Cloud Run
-def trigger_tf_run(workspace_id):
+def trigger_tf_run(api_token, workspace_id):
+    headers = {
+        "Authorization": f"Bearer {api_token}",
+        "Content-Type": "application/vnd.api+json",
+    }
     payload = {
         "data": {
             "attributes": {
@@ -321,7 +329,7 @@ def trigger_tf_run(workspace_id):
     
     response = requests.post(
         "https://app.terraform.io/api/v2/runs",
-        headers=HEADERS,
+        headers=headers,
         json=payload,
     )
 
@@ -329,8 +337,16 @@ def trigger_tf_run(workspace_id):
 
 # Lambda Handler Function
 def lambda_handler(event, context):
+    # Retrieve API token from Secrets Manager
+    api_token = get_tfc_api_token()
+    if not api_token:
+        print("Failed to retrieve Terraform API token.")
+        return {"statusCode": 500, "body": "Terraform API token retrieval failed"}
+
+    org_name = os.environ["TFC_ORG_NAME"]  # Organization name from Lambda env variables
+
     # Get Old AMI from event (EventBridge sends parameter name, fetch previous value)
-    old_ami = event["detail"]["oldValue"]
+    old_ami = event["detail"].get("oldValue", None)
     latest_ami = get_latest_ami()
 
     # Find workspace IDs based on EC2 instances
@@ -338,18 +354,17 @@ def lambda_handler(event, context):
 
     if not workspace_ids:
         print("No matching EC2 instances found for the old AMI.")
-        return
+        return {"statusCode": 200, "body": "No matching EC2 instances"}
 
     # Find matching Terraform Cloud Workspaces
-    matching_workspaces = find_matching_workspaces(workspace_ids)
+    matching_workspaces = find_matching_workspaces(api_token, org_name, workspace_ids)
 
     if not matching_workspaces:
         print("No matching Terraform Cloud Workspaces found.")
-        return
+        return {"statusCode": 200, "body": "No matching Terraform Cloud Workspaces"}
 
     # Trigger Terraform runs for each matching workspace
     for ws_id in matching_workspaces:
-        trigger_tf_run(ws_id)
+        trigger_tf_run(api_token, ws_id)
 
     return {"statusCode": 200, "body": "Terraform runs triggered successfully."}
-
