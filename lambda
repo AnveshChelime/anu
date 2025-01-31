@@ -253,14 +253,17 @@ import json
 # AWS Clients
 ec2_client = boto3.client("ec2")
 ssm_client = boto3.client("ssm")
+secrets_client = boto3.client("secretsmanager")  # ✅ Add Secrets Manager client
 
-# Terraform API Details
-TFC_API_TOKEN = os.environ["TFC_API_TOKEN"]
-ORG_NAME = os.environ["TFC_ORG_NAME"]
-HEADERS = {
-    "Authorization": f"Bearer {TFC_API_TOKEN}",
-    "Content-Type": "application/vnd.api+json",
-}
+# Retrieve Terraform API Token from AWS Secrets Manager
+def get_tfc_api_token():
+    secret_name = "TFC_API_TOKEN"  # ✅ Replace with your secret name
+    try:
+        response = secrets_client.get_secret_value(SecretId=secret_name)
+        return response["SecretString"] if "SecretString" in response else None
+    except Exception as e:
+        print(f"Error retrieving secret: {e}")
+        return None
 
 # Get latest AMI from SSM Parameter Store
 def get_latest_ami():
