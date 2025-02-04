@@ -1,20 +1,3 @@
-import boto3
-import requests
-import os
-
-def get_tfc_api_token():
-    secret_name = os.environ["TFC_API_TOKEN"]
-    client = boto3.client("secretsmanager")
-
-    try:
-        response = client.get_secret_value(SecretId=secret_name)
-        secret_value = response["SecretString"]
-        print(f"✅ Token Retrieved: {secret_value[:5]}...")  # Partially masked
-        return secret_value.strip()  # Remove hidden spaces
-    except Exception as e:
-        print(f"❌ Error retrieving Terraform API token: {e}")
-        return None
-
 def lambda_handler(event, context):
     api_token = get_tfc_api_token()
     if not api_token:
@@ -32,12 +15,14 @@ def lambda_handler(event, context):
     )
 
     print(f"Response Code: {response.status_code}")
-    print(f"Response Body: {response.text}")
+    print(f"Response Headers: {response.headers}")
+    print(f"Response Body: {response.text}")  # Full API error message
 
     return {
         "statusCode": response.status_code,
         "body": response.text
     }
+
 
 
 
