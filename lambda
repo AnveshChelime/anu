@@ -3,12 +3,14 @@ import requests
 import os
 
 def get_tfc_api_token():
-    secret_name = os.environ["TFC_API_TOKEN"]  # Ensure the env variable is set
+    secret_name = os.environ["TFC_API_TOKEN"]
     client = boto3.client("secretsmanager")
 
     try:
         response = client.get_secret_value(SecretId=secret_name)
-        return response["SecretString"]
+        secret_value = response["SecretString"]
+        print(f"✅ Token Retrieved: {secret_value[:5]}...")  # Partially masked
+        return secret_value.strip()  # Remove hidden spaces
     except Exception as e:
         print(f"❌ Error retrieving Terraform API token: {e}")
         return None
@@ -28,6 +30,9 @@ def lambda_handler(event, context):
         f"https://app.terraform.io/api/v2/organizations/{org_name}/workspaces",
         headers=headers
     )
+
+    print(f"Response Code: {response.status_code}")
+    print(f"Response Body: {response.text}")
 
     return {
         "statusCode": response.status_code,
