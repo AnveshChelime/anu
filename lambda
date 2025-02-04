@@ -1,44 +1,22 @@
 
 import boto3
-import requests
 import os
-import json
-
-# AWS Secrets Manager client
-secrets_client = boto3.client("secretsmanager")
-
-def get_tfc_api_token():
-    secret_name = os.environ["TFC_API_SECRET_NAME"]  # Secret name as environment variable
-    try:
-        response = secrets_client.get_secret_value(SecretId=secret_name)
-        secret_value = json.loads(response["SecretString"])
-        api_token = secret_value.get("TFC_API_TOKEN")
-        return api_token
-    except Exception as e:
-        print(f"Error retrieving API token: {e}")
-        return None
 
 def lambda_handler(event, context):
-    api_token = get_tfc_api_token()
-    org_name = os.environ["TFC_ORG_NAME"]
+    secret_name = os.environ["TFC_API_TOKEN"]  # Both env variable and secret name are the same
+    client = boto3.client("secretsmanager")
 
-    if not api_token:
-        return {"statusCode": 500, "body": "Failed to retrieve API token"}
-
-    headers = {
-        "Authorization": f"Bearer {api_token}",
-        "Content-Type": "application/vnd.api+json",
-    }
-
-    response = requests.get(
-        f"https://app.terraform.io/api/v2/organizations/{org_name}/workspaces",
-        headers=headers
-    )
-
-    return {
-        "statusCode": response.status_code,
-        "body": response.text
-    }
+    try:
+        response = client.get_secret_value(SecretId=secret_name)
+        return {
+            "statusCode": 200,
+            "body": response["SecretString"]
+        }
+    except Exception as e:
+        return {
+            "statusCode": 500,
+            "body": f"Failed to retrieve secret: {str(e)}"
+        }
 
 
 
