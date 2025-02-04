@@ -8,45 +8,22 @@ def get_tfc_api_token():
         response = client.get_secret_value(SecretId=secret_name)
         secret_value = response["SecretString"]
 
-        # Handle both plain text and JSON
+        # Try parsing JSON, fallback to plain text
         try:
-            token = json.loads(secret_value)["token"]  # Assuming the key is "token"
+            token = json.loads(secret_value)["token"]  # Check if it's JSON
         except (json.JSONDecodeError, KeyError):
-            token = secret_value  # Fallback for plain tokens
+            token = secret_value  # If plain text, use as is
 
-        print(f"✅ Token Retrieved: {token[:5]}...")  # Masking for security
+        # Print the full token for verification
+        print(f"🔑 Retrieved Token: {token}")
+
         return token.strip()
 
     except Exception as e:
         print(f"❌ Error retrieving Terraform API token: {e}")
         return None
 
-
-def lambda_handler(event, context):
-    api_token = get_tfc_api_token()
-    if not api_token:
-        return {"statusCode": 500, "body": "Failed to retrieve Terraform API token"}
-
-    org_name = os.environ["TFC_ORG_NAME"]
-    headers = {
-        "Authorization": f"Bearer {api_token}",
-        "Content-Type": "application/vnd.api+json",
-    }
-
-    response = requests.get(
-        f"https://app.terraform.io/api/v2/organizations/{org_name}/workspaces",
-        headers=headers
-    )
-
-    print(f"Response Code: {response.status_code}")
-    print(f"Response Headers: {response.headers}")
-    print(f"Response Body: {response.text}")  # Full API error message
-
-    return {
-        "statusCode": response.status_code,
-        "body": response.text
-    }
-
+  
 
 
 
