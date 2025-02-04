@@ -1,71 +1,28 @@
-import boto3
-import requests
-import os
-import json
-
-# Retrieve Terraform API Token from AWS Secrets Manager
-def get_tfc_api_token():
-    secret_name = os.environ["TFC_API_TOKEN"]
-    client = boto3.client("secretsmanager")
-
-    try:
-        response = client.get_secret_value(SecretId=secret_name)
-        secret_value = response["SecretString"]
-
-        # Try parsing JSON, fallback to plain text
-        try:
-            token = json.loads(secret_value)["token"]  # Check if it's JSON
-        except (json.JSONDecodeError, KeyError):
-            token = secret_value  # If plain text, use as is
-
-        # Print the full token for verification
-        print(f"🔑 Retrieved Token: {token}")
-
-        return token.strip()
-
-    except Exception as e:
-        print(f"❌ Error retrieving Terraform API token: {e}")
-        return None
-
-# ✅ Lambda Handler Function
-def lambda_handler(event, context):
-    # Retrieve API Token
-    api_token = get_tfc_api_token()
-    if not api_token:
-        return {"statusCode": 500, "body": "Failed to retrieve Terraform API token"}
-
-    # Organization Name (from environment variables)
-    org_name = os.environ["TFC_ORG_NAME"]
-    
-    # Headers for Terraform API
+def get_tf_workspaces(api_token, org_name):
     headers = {
-        "Authorization": f"Bearer {api_token}",
+        "Authorization": f"Bearer {api_token.strip()}",
         "Content-Type": "application/vnd.api+json",
     }
+    
+    workspaces = []
+    url = f"https://app.terraform.io/api/v2/organizations/{org_name}/workspaces"
 
-    # Make API Request to Terraform Cloud
-    try:
-        response = requests.get(
-            f"https://app.terraform.io/api/v2/organizations/{org_name}/workspaces",
-            headers=headers
-        )
+    while url:
+        response = requests.get(url, headers=headers)
+        print(f"🔹 API Response Code: {response.status_code}")
+        
+        if response.status_code != 200:
+            print(f"❌ Error fetching workspaces: {response.text}")
+            break
 
-        print(f"🌐 Response Code: {response.status_code}")
-        print(f"📦 Response Body: {response.text}")
+        data = response.json()
+        workspaces.extend(data.get("data", []))
+        
+        # Check for pagination
+        url = data.get("links", {}).get("next")
 
-        return {
-            "statusCode": response.status_code,
-            "body": response.text
-        }
-
-    except Exception as e:
-        print(f"❌ Error during API request: {e}")
-        return {
-            "statusCode": 500,
-            "body": f"API request failed: {e}"
-        }
-
-
+    print(f"🔹 Total Workspaces Retrieved: {len(workspaces)}")
+    return workspaces
 
 
 
