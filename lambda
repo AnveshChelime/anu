@@ -1,3 +1,62 @@
+
+import requests
+import os
+
+def lambda_handler(event, context):
+    api_token = os.environ["TFC_API_TOKEN"]
+    org_name = os.environ["TFC_ORG_NAME"]
+    headers = {
+        "Authorization": f"Bearer {api_token}",
+        "Content-Type": "application/vnd.api+json",
+    }
+    
+    response = requests.get(
+        f"https://app.terraform.io/api/v2/organizations/{org_name}/workspaces",
+        headers=headers
+    )
+    
+    return {
+        "statusCode": response.status_code,
+        "body": response.text
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import boto3 # type: ignore
 import os
 import time
