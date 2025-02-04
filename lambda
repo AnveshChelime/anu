@@ -1,3 +1,27 @@
+import json
+
+def get_tfc_api_token():
+    secret_name = os.environ["TFC_API_TOKEN"]
+    client = boto3.client("secretsmanager")
+
+    try:
+        response = client.get_secret_value(SecretId=secret_name)
+        secret_value = response["SecretString"]
+
+        # Handle both plain text and JSON
+        try:
+            token = json.loads(secret_value)["token"]  # Assuming the key is "token"
+        except (json.JSONDecodeError, KeyError):
+            token = secret_value  # Fallback for plain tokens
+
+        print(f"✅ Token Retrieved: {token[:5]}...")  # Masking for security
+        return token.strip()
+
+    except Exception as e:
+        print(f"❌ Error retrieving Terraform API token: {e}")
+        return None
+
+
 def lambda_handler(event, context):
     api_token = get_tfc_api_token()
     if not api_token:
