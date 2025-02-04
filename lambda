@@ -1,5 +1,9 @@
+import boto3
+import requests
+import os
 import json
 
+# Retrieve Terraform API Token from AWS Secrets Manager
 def get_tfc_api_token():
     secret_name = os.environ["TFC_API_TOKEN"]
     client = boto3.client("secretsmanager")
@@ -23,8 +27,43 @@ def get_tfc_api_token():
         print(f"❌ Error retrieving Terraform API token: {e}")
         return None
 
-  
+# ✅ Lambda Handler Function
+def lambda_handler(event, context):
+    # Retrieve API Token
+    api_token = get_tfc_api_token()
+    if not api_token:
+        return {"statusCode": 500, "body": "Failed to retrieve Terraform API token"}
 
+    # Organization Name (from environment variables)
+    org_name = os.environ["TFC_ORG_NAME"]
+    
+    # Headers for Terraform API
+    headers = {
+        "Authorization": f"Bearer {api_token}",
+        "Content-Type": "application/vnd.api+json",
+    }
+
+    # Make API Request to Terraform Cloud
+    try:
+        response = requests.get(
+            f"https://app.terraform.io/api/v2/organizations/{org_name}/workspaces",
+            headers=headers
+        )
+
+        print(f"🌐 Response Code: {response.status_code}")
+        print(f"📦 Response Body: {response.text}")
+
+        return {
+            "statusCode": response.status_code,
+            "body": response.text
+        }
+
+    except Exception as e:
+        print(f"❌ Error during API request: {e}")
+        return {
+            "statusCode": 500,
+            "body": f"API request failed: {e}"
+        }
 
 
 
