@@ -365,6 +365,18 @@ def trigger_tf_run(api_token, workspace_id):
 
 # Lambda Handler Function
 def lambda_handler(event, context):
+    try:
+        response = requests.get("https://www.google.com")
+        return {
+            "statusCode": 200,
+            "body": f"Internet access confirmed: {response.status_code}"
+        }
+    except Exception as e:
+        return {
+            "statusCode": 500,
+            "body": f"Internet access failed: {str(e)}"
+        }
+
     # Retrieve API token from Secrets Manager
     api_token = get_tfc_api_token()
     org_name = os.environ.get("TFC_ORG_NAME")  # Ensure environment variable exists
