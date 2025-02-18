@@ -1,308 +1,3 @@
-def get_tf_workspaces(api_token, org_name):
-    headers = {
-        "Authorization": f"Bearer {api_token.strip()}",
-        "Content-Type": "application/vnd.api+json",
-    }
-    
-    workspaces = []
-    url = f"https://app.terraform.io/api/v2/organizations/{org_name}/workspaces"
-
-    while url:
-        response = requests.get(url, headers=headers)
-        print(f"🔹 API Response Code: {response.status_code}")
-        
-        if response.status_code != 200:
-            print(f"❌ Error fetching workspaces: {response.text}")
-            break
-
-        data = response.json()
-        workspaces.extend(data.get("data", []))
-        
-        # Check for pagination
-        url = data.get("links", {}).get("next")
-
-    print(f"🔹 Total Workspaces Retrieved: {len(workspaces)}")
-    return workspaces
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-import boto3 # type: ignore
-import os
-import time
-import json
-
-ec2 = boto3.client('ec2')
-autoscaling = boto3.client('autoscaling')
-ssm = boto3.client('ssm')
-
-def lambda_handler(event, context):
-    try:
-        # Fetch AMI ID from SSM Parameter Store
-        parameter_name = "/ami/linux/test"
-        response = ssm.get_parameter(Name=parameter_name)
-        ami_id = response['Parameter']['Value']
-        print(f"Retrieved AMI ID: {ami_id}")
-    except Exception as e:
-        print(f"Failed to fetch AMI from Parameter Store: {e}")
-        return
-
-    # Fetch configurations from environment variables
-    excluded_instances = os.environ.get("EXCLUDED_INSTANCES", "").split(",")
-    excluded_asgs = os.environ.get("EXCLUDED_ASGS", "").split(",")
-    asg_configurations = json.loads(os.environ.get("ASG_CONFIGURATIONS", "{}"))
-
-    try:
-        # Process Auto Scaling Groups (ASG)
-        print("Processing ASGs...")
-        asgs = autoscaling.describe_auto_scaling_groups()['AutoScalingGroups']
-        for asg in asgs:
-            asg_name = asg['AutoScalingGroupName']
-
-            # Skip excluded ASGs
-            if asg_name in excluded_asgs:
-                print(f"Skipping ASG: {asg_name}")
-                continue
-
-            # Update ASG configurations if defined
-            if asg_name in asg_configurations:
-                config = asg_configurations[asg_name]
-                print(f"Updating ASG {asg_name} with configurations: {config}")
-                autoscaling.update_auto_scaling_group(
-                    AutoScalingGroupName=asg_name,
-                    MinSize=config['min'],
-                    MaxSize=config['max'],
-                    DesiredCapacity=config['desired']
-                )
-
-            # Update Launch Template with new AMI
-            if 'LaunchTemplate' in asg:
-                launch_template_id = asg['LaunchTemplate']['LaunchTemplateId']
-                current_version = asg['LaunchTemplate']['Version']
-                print(f"ASG {asg_name} is using Launch Template: {launch_template_id}, Version: {current_version}")
-
-                # Create a new version of the launch template with the new AMI
-                response = ec2.create_launch_template_version(
-                    LaunchTemplateId=launch_template_id,
-                    SourceVersion=current_version,
-                    LaunchTemplateData={'ImageId': ami_id}
-                )
-                new_version = response['LaunchTemplateVersion']['VersionNumber']
-                print(f"Created new Launch Template Version: {new_version} for ASG: {asg_name}")
-
-                # Update the ASG to use the new launch template version
-                autoscaling.update_auto_scaling_group(
-                    AutoScalingGroupName=asg_name,
-                    LaunchTemplate={
-                        'LaunchTemplateId': launch_template_id,
-                        'Version': str(new_version)
-                    }
-                )
-                print(f"Updated ASG {asg_name} to use Launch Template version {new_version}")
-            else:
-                print(f"ASG {asg_name} does not have a Launch Template. Skipping Launch Template update.")
-
-            # Capture volumes for instances in ASG
-            volumes_to_reattach = {}
-            for instance in asg['Instances']:
-                instance_id = instance['InstanceId']
-                print(f"Capturing volumes for instance {instance_id}...")
-                volumes = ec2.describe_volumes(Filters=[{'Name': 'attachment.instance-id', 'Values': [instance_id]}])
-                volumes_to_reattach[instance_id] = [
-                    {'VolumeId': volume['VolumeId'], 'Device': attachment['Device']}
-                    for volume in volumes['Volumes']
-                    for attachment in volume['Attachments']
-                    if attachment['Device'] != '/dev/xvda'  # Exclude root volume
-                ]
-                print(f"Captured volumes for instance {instance_id}: {volumes_to_reattach[instance_id]}")
-
-            # Start instance refresh for ASG
-            print(f"Starting instance refresh for ASG: {asg_name}")
-            autoscaling.start_instance_refresh(AutoScalingGroupName=asg_name)
-            print(f"Waiting for new instances to be launched in ASG: {asg_name}")
-            time.sleep(500)  # Adjust as needed
-
-            # Fetch refreshed instances
-            refreshed_instances = ec2.describe_instances(Filters=[
-                {'Name': 'tag:aws:autoscaling:groupName', 'Values': [asg_name]},
-                {'Name': 'instance-state-name', 'Values': ['running']}
-            ])
-            refreshed_instance_ids = [
-                instance['InstanceId']
-                for reservation in refreshed_instances['Reservations']
-                for instance in reservation['Instances']
-            ]
-            print(f"Refreshed instance IDs for ASG {asg_name}: {refreshed_instance_ids}")
-
-            # Ensure mapping of old instances to new instances
-            if len(volumes_to_reattach) != len(refreshed_instance_ids):
-                print(f"Mismatch in number of old instances ({len(volumes_to_reattach)}) and refreshed instances ({len(refreshed_instance_ids)})")
-                return
-
-            old_to_new_mapping = dict(zip(volumes_to_reattach.keys(), refreshed_instance_ids))
-            print(f"Mapping of old to new instances: {old_to_new_mapping}")
-
-            # Reattach volumes to the correct instances
-            for old_instance_id, new_instance_id in old_to_new_mapping.items():
-                print(f"Reattaching volumes from old instance {old_instance_id} to new instance {new_instance_id}...")
-                for volume in volumes_to_reattach[old_instance_id]:
-                    volume_id = volume['VolumeId']
-                    device_name = volume['Device']
-
-                    # Check volume state before reattaching
-                    volume_details = ec2.describe_volumes(VolumeIds=[volume_id])
-                    attachment_state = (
-                        volume_details["Volumes"][0]["Attachments"][0]["State"]
-                        if volume_details["Volumes"][0]["Attachments"]
-                        else "detached"
-                    )
-
-                    if attachment_state == "attached":
-                        print(f"Skipping reattachment of volume {volume_id} as it is already attached.")
-                        continue
-
-                    try:
-                        print(f"Reattaching volume {volume_id} to instance {new_instance_id} on device {device_name}...")
-                        ec2.attach_volume(
-                            VolumeId=volume_id,
-                            InstanceId=new_instance_id,
-                            Device=device_name
-                        )
-                    except Exception as e:
-                        print(f"Failed to reattach volume {volume_id} to instance {new_instance_id}: {e}")
-                    print("ASG updates, refresh, and volume reattachments completed successfully.")
-    except Exception as e:
-        print(f"Error updating ASGs: {e}")
-
-
-    try:
-        # Perform updates on standalone instances
-        print("Updating standalone EC2 instances...")
-        standalone_instances = []
-        instances = ec2.describe_instances()
-        for reservation in instances.get('Reservations', []):
-            for instance in reservation.get('Instances', []):
-                instance_id = instance.get('InstanceId')
-                state = instance.get('State', {}).get('Name')
-
-                # Skip excluded or non-running instances
-                if instance_id in excluded_instances or state != "running":
-                    print(f"Excluding instance {instance_id} (state: {state})")
-                    continue
-
-                # Check if the instance is part of an ASG
-                tags = {tag['Key']: tag['Value'] for tag in instance.get('Tags', [])}
-                if 'aws:autoscaling:groupName' in tags:
-                    print(f"Skipping ASG-managed instance: {instance_id} (ASG: {tags['aws:autoscaling:groupName']})")
-                    continue
-
-                # Add standalone instance to the list
-                standalone_instances.append(instance)
-
-        print(f"Standalone instances to update: {standalone_instances}")
-
-        # Perform updates on standalone instances
-        for instance in standalone_instances:
-            instance_id = instance['InstanceId']
-            subnet_id = instance['SubnetId']
-            instance_type = instance['InstanceType']
-            security_groups = [sg['GroupId'] for sg in instance.get('SecurityGroups', [])]
-
-            # Capture and terminate standalone instance volumes
-            volumes = ec2.describe_volumes(Filters=[{'Name': 'attachment.instance-id', 'Values': [instance_id]}])
-            captured_volumes = []
-            for volume in volumes['Volumes']:
-                volume_id = volume['VolumeId']
-                device_name = volume['Attachments'][0]['Device']
-                if device_name != '/dev/xvda':  # Exclude root volume
-                    captured_volumes.append({'VolumeId': volume_id, 'Device': device_name})
-                    print(f"Captured volume {volume_id} (Device: {device_name}) for instance {instance_id}")
-
-            # Terminate instance
-            print(f"Terminating standalone instance: {instance_id}")
-            ec2.terminate_instances(InstanceIds=[instance_id])
-            time.sleep(100)  # Allow time for termination
-
-            try:
-                # Recreate instance
-                print(f"Recreating standalone instance: {instance_id} with AMI: {ami_id}")
-                print(f"recreating with SubnetId: {subnet_id}, SecurityGroups: {security_groups}")
-
-                new_instance = ec2.run_instances(
-                    ImageId=ami_id,
-                    MinCount=1,
-                    MaxCount=1,
-                    InstanceType=instance_type,
-                    SubnetId=subnet_id,
-                    SecurityGroupIds=security_groups
-                    )['Instances'][0]
-
-                new_instance_id = new_instance['InstanceId']
-                print(f"New instance created: {new_instance_id}")
-
-                # Wait for the instance to stabilize
-                print(f"Waiting for instance {new_instance_id} to reach running state...")
-                time.sleep(150)  # Allow instance to stabilize
-
-                # Validate instance state
-                response = ec2.describe_instances(InstanceIds=[new_instance_id])
-                state = response['Reservations'][0]['Instances'][0]['State']['Name']
-                if state != "running":
-                    state_reason = response['Reservations'][0]['Instances'][0].get('StateReason', {})
-                    print(f"Instance {new_instance_id} is in state: {state}. Termination reason: {state_reason}")
-                    return
-                print(f"Instance {new_instance_id} is now running.")
-
-                # Reattach volumes
-                for volume in captured_volumes:
-                    volume_id = volume['VolumeId']
-                    device_name = volume['Device']
-                    try:
-                        print(f"Reattaching volume {volume_id} to instance {new_instance_id} on device {device_name}...")
-                        ec2.attach_volume(
-                            VolumeId=volume_id,
-                            InstanceId=new_instance_id,
-                            Device=device_name
-                        )
-                    except Exception as e:
-                        print(f"Failed to reattach volume {volume_id} to instance {new_instance_id}: {e}")
-            except Exception as e:
-                print(f"Failed to recreate standalone instance {instance_id}: {e}")
-
-        print("Standalone instance refresh completed successfully.")
-    except Exception as e:
-        print(f"Error updating standalone EC2 instances: {e}")
-
-
 import boto3
 import requests
 import os
@@ -315,14 +10,15 @@ secrets_client = boto3.client("secretsmanager")
 
 # Retrieve Terraform API Token from AWS Secrets Manager
 def get_tfc_api_token():
-    secret_name = "TFC_API_TOKEN"
+    secret_name = os.environ["TFC_API_TOKEN"]
+    client = boto3.client("secretsmanager")
+
     try:
-        response = secrets_client.get_secret_value(SecretId=secret_name)
-        secret_value = response["SecretString"] if "SecretString" in response else None
-        print(f"🔹 Retrieved Secret: {'Yes' if secret_value else 'No'}")
-        return secret_value
+        response = client.get_secret_value(SecretId=secret_name)
+        secret_value = response["SecretString"]
+        return json.loads(secret_value).get("token", secret_value)  # If JSON, extract "token" key
     except Exception as e:
-        print(f"❌ Error retrieving secret: {e}")
+        print(f"❌ Error retrieving Terraform API token: {e}")
         return None
 
 # Get latest AMI from SSM Parameter Store
@@ -336,7 +32,7 @@ def get_latest_ami():
 
 # Get EC2 instances running OLD AMI and extract workspace_id
 def get_workspace_ids(old_ami):
-    workspace_ids = set()
+    workspace_ids = {}
     try:
         instances = ec2_client.describe_instances(
             Filters=[{"Name": "image-id", "Values": [old_ami]}]
@@ -344,20 +40,28 @@ def get_workspace_ids(old_ami):
 
         for reservation in instances["Reservations"]:
             for instance in reservation["Instances"]:
+                instance_id = instance["InstanceId"]
+                workspace_id = None
+                
                 for tag in instance.get("Tags", []):
-                    if tag["Key"] == "tfc_wsid":  # Ensure this tag exists
-                        workspace_ids.add(tag["Value"])
+                    if tag["Key"] == "tfc_wsid":
+                        workspace_id = tag["Value"]
+
+                if workspace_id:
+                    workspace_ids[instance_id] = workspace_id
+                else:
+                    print(f"⚠️ Skipping {instance_id}: No workspace ID found.")
 
     except Exception as e:
         print(f"❌ Error fetching EC2 instances: {e}")
 
     print(f"🔹 Found Workspace IDs: {workspace_ids}")
-    return list(workspace_ids)
+    return workspace_ids
 
 # Get list of workspaces from Terraform Cloud
 def get_tf_workspaces(api_token, org_name):
     headers = {
-        "Authorization": f"Bearer {api_token}",
+        "Authorization": f"Bearer {api_token.strip()}",
         "Content-Type": "application/vnd.api+json",
     }
     try:
@@ -365,32 +69,36 @@ def get_tf_workspaces(api_token, org_name):
             f"https://app.terraform.io/api/v2/organizations/{org_name}/workspaces",
             headers=headers,
         )
-        print(f"🔹 Terraform API Response: {response.status_code}")
-        print(f"🔹 Terraform API Response Body: {response.text}")  # Debug API response
-
         response_json = response.json()
+        
         if "data" not in response_json:
             print("⚠️ API Response does not contain 'data' key!")
-            return []
-        return response_json["data"]
+            return {}
+
+        return {ws["id"]: ws["attributes"]["name"] for ws in response_json["data"]}
 
     except Exception as e:
         print(f"❌ Error fetching Terraform workspaces: {e}")
-        return []
+        return {}
 
-# Find matching Terraform workspaces
-def find_matching_workspaces(api_token, org_name, workspace_ids):
+# Find matching Terraform workspaces with Account Validation
+def find_matching_workspaces(api_token, org_name, workspace_ids, aws_account_id):
     workspaces = get_tf_workspaces(api_token, org_name)
-    matched_workspaces = [
-        ws["id"] for ws in workspaces if ws["attributes"]["name"] in workspace_ids
-    ]
-    print(f"🔹 Matched Workspaces: {matched_workspaces}")
+    matched_workspaces = {}
+
+    for instance_id, ws_id in workspace_ids.items():
+        if ws_id in workspaces:
+            matched_workspaces[instance_id] = ws_id
+        else:
+            print(f"🚨 Security Check Failed: Workspace {ws_id} does not match AWS account {aws_account_id}, skipping.")
+
+    print(f"🔹 Matched Workspaces (Valid): {matched_workspaces}")
     return matched_workspaces
 
 # Trigger Terraform Cloud Run
 def trigger_tf_run(api_token, workspace_id):
     headers = {
-        "Authorization": f"Bearer {api_token}",
+        "Authorization": f"Bearer {api_token.strip()}",
         "Content-Type": "application/vnd.api+json",
     }
     payload = {
@@ -423,61 +131,44 @@ def trigger_tf_run(api_token, workspace_id):
 
 # Lambda Handler Function
 def lambda_handler(event, context):
-    try:
-        response = requests.get("https://www.google.com")
-        return {
-            "statusCode": 200,
-            "body": f"Internet access confirmed: {response.status_code}"
-        }
-    except Exception as e:
-        return {
-            "statusCode": 500,
-            "body": f"Internet access failed: {str(e)}"
-        }
-
     # Retrieve API token from Secrets Manager
     api_token = get_tfc_api_token()
-    org_name = os.environ.get("TFC_ORG_NAME")  # Ensure environment variable exists
+    if not api_token:
+        print("❌ Error: Failed to retrieve Terraform API token.")
+        return {"statusCode": 500, "body": "Terraform API token retrieval failed"}
+
+    org_name = os.environ.get("TFC_ORG_NAME")
+    aws_account_id = boto3.client("sts").get_caller_identity()["Account"]
 
     # Debugging: Print Retrieved API Token and Org Name
     print(f"🔹 API Token Retrieved: {'Yes' if api_token else 'No'}")
     print(f"🔹 Organization Name: {org_name}")
-
-    if not api_token:
-        print("❌ Error: Failed to retrieve Terraform API token.")
-        return {"statusCode": 500, "body": "Terraform API token retrieval failed"}
+    print(f"🔹 AWS Account ID: {aws_account_id}")
 
     if not org_name:
         print("❌ Error: Organization name is missing.")
         return {"statusCode": 500, "body": "Organization name retrieval failed"}
 
-    # Get Old AMI from the EventBridge event (Debug event structure)
-    print(f"🔹 Event Data: {json.dumps(event, indent=2)}")
-
-    old_ami = event["detail"].get("oldValue")  # Ensure this exists
-    if not old_ami:
-        print("⚠️ No old AMI found in event. Fetching from SSM.")
-        old_ami = get_latest_ami()
-
-    print(f"🔹 Old AMI: {old_ami}")
+    # Get Old AMI from parameter store
+    latest_ami = get_latest_ami()
+    if not latest_ami:
+        return {"statusCode": 500, "body": "Failed to fetch AMI from SSM"}
 
     # Find workspace IDs based on EC2 instances
-    workspace_ids = get_workspace_ids(old_ami)
-
+    workspace_ids = get_workspace_ids(latest_ami)
     if not workspace_ids:
         print("⚠️ No matching EC2 instances found for the old AMI.")
         return {"statusCode": 200, "body": "No matching EC2 instances"}
 
-    # Find matching Terraform Cloud Workspaces
-    matching_workspaces = find_matching_workspaces(api_token, org_name, workspace_ids)
-
+    # Find matching Terraform Cloud Workspaces with security validation
+    matching_workspaces = find_matching_workspaces(api_token, org_name, workspace_ids, aws_account_id)
     if not matching_workspaces:
         print("⚠️ No matching Terraform Cloud Workspaces found.")
         return {"statusCode": 200, "body": "No matching Terraform Cloud Workspaces"}
 
     # Trigger Terraform runs for each matching workspace
-    for ws_id in matching_workspaces:
+    for instance_id, ws_id in matching_workspaces.items():
+        print(f"🚀 Triggering Terraform Run for EC2: {instance_id} with Workspace: {ws_id}")
         trigger_tf_run(api_token, ws_id)
 
     return {"statusCode": 200, "body": "Terraform runs triggered successfully."}
-
