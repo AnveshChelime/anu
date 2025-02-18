@@ -94,25 +94,27 @@ def get_tf_workspaces(api_token, org_name):
     print(f"🔹 Total Workspaces Retrieved: {len(workspaces)}")
     return workspaces
 
-# Find matching Terraform workspaces
 def find_matching_workspaces(api_token, org_name, workspace_ids, aws_account_id):
     workspaces = get_tf_workspaces(api_token, org_name)
     matched_workspaces = []
 
     for ws in workspaces:
-        workspace_id = ws["id"]  # Workspace ID from Terraform API
-        workspace_account = ws["attributes"].get("account-id", None)  # Fetch AWS Account ID
+        workspace_id = ws["id"]
+        workspace_name = ws["attributes"]["name"]
+        tags = ws["attributes"].get("tags", [])  # Extract workspace tags
+        
+        # Extract AWS Account ID from tags
+        workspace_account = None
+        for tag in tags:
+            if tag.startswith("account:aws-"):
+                workspace_account = tag.split("account:aws-")[1]  # Extract the account ID
 
-        # Ensure workspace ID matches an EC2 tag
-        if workspace_id in workspace_ids:
-            if workspace_account:  # Ensure workspace has an account ID
-                if workspace_account == aws_account_id:
-                    print(f"✅ Workspace {workspace_id} matches AWS Account: {workspace_account}")
-                    matched_workspaces.append(workspace_id)
-                else:
-                    print(f"🚨 Security Check Failed: {workspace_id} belongs to {workspace_account}, skipping.")
+        if workspace_name in workspace_ids:
+            if workspace_account and workspace_account == aws_account_id:
+                print(f"✅ Workspace {workspace_id} matches AWS Account: {workspace_account}")
+                matched_workspaces.append(workspace_id)
             else:
-                print(f"⚠️ Workspace {workspace_id} has no AWS Account ID assigned, skipping.")
+                print(f"🚨 Security Check Failed: {workspace_name} belongs to {workspace_account}, skipping.")
 
     print(f"🔹 Matched Workspaces (Valid): {matched_workspaces}")
     return matched_workspaces
