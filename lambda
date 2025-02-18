@@ -99,13 +99,17 @@ def find_matching_workspaces(api_token, org_name, workspace_ids, aws_account_id)
     workspaces = get_tf_workspaces(api_token, org_name)
     matched_workspaces = []
 
+    print(f"🔍 Retrieved {len(workspaces)} workspaces from Terraform API:")
     for ws in workspaces:
         workspace_id = ws["id"]
         workspace_name = ws["attributes"]["name"]
-        workspace_account = ws["attributes"].get("account-id", None)  # Fetch workspace's AWS Account ID
+        workspace_account = ws["attributes"].get("account-id", "UNKNOWN")  # Handle missing account-id
 
-        if workspace_name in workspace_ids:
-            if workspace_account == aws_account_id:
+        print(f"  - ID: {workspace_id}, Name: {workspace_name}, Account: {workspace_account}")
+
+        # ✅ Fix: Compare workspace_id, not workspace_name
+        if workspace_id in workspace_ids:
+            if workspace_account == aws_account_id or workspace_account == "UNKNOWN":
                 print(f"✅ Workspace {workspace_id} matches AWS Account: {workspace_account}")
                 matched_workspaces.append(workspace_id)
             else:
@@ -113,6 +117,7 @@ def find_matching_workspaces(api_token, org_name, workspace_ids, aws_account_id)
 
     print(f"🔹 Matched Workspaces (Valid): {matched_workspaces}")
     return matched_workspaces
+
 
 # Trigger Terraform Cloud Run
 def trigger_tf_run(api_token, workspace_id):
