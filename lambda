@@ -105,19 +105,18 @@ def find_matching_workspaces(api_token, org_name, workspace_ids, aws_account_id)
     for ws in workspaces:
         workspace_id = ws["id"]
         workspace_name = ws["attributes"]["name"]
-        
-        # Debugging: Print full workspace details
-        print(f"🔍 DEBUG: Checking Workspace: {workspace_id} (Name: {workspace_name})")
-        print(f"🔍 Full Attributes: {ws['attributes']}")
 
-        # Extract AWS account ID from Terraform API response
+        # Extract AWS Account ID
         workspace_account = ws["attributes"].get("account-id", "UNKNOWN")
 
-        # If account-id is missing, check workspace tags
+        # If account-id is missing, extract from tag-names
         if workspace_account == "UNKNOWN":
-            workspace_tags = ws["attributes"].get("tags", {})
-            workspace_account = workspace_tags.get("account", "UNKNOWN")
-        
+            workspace_tags = ws["attributes"].get("tag-names", [])
+            for tag in workspace_tags:
+                if tag.startswith("account:aws-"):
+                    workspace_account = tag.split("account:aws-")[1]  # Extract AWS Account ID
+                    break  # Stop after finding the correct tag
+
         print(f"🔍 Extracted AWS Account ID: {workspace_account}")
 
         # Security Check: Only match if AWS account ID matches
@@ -130,6 +129,7 @@ def find_matching_workspaces(api_token, org_name, workspace_ids, aws_account_id)
 
     print(f"🔹 Matched Workspaces (Valid): {matched_workspaces}")
     return matched_workspaces
+
 
 
 
