@@ -99,33 +99,26 @@ def find_matching_workspaces(api_token, org_name, workspace_ids, aws_account_id)
     workspaces = get_tf_workspaces(api_token, org_name)
     matched_workspaces = []
 
-    print(f"🔍 Total Workspaces Retrieved: {len(workspaces)}")
-    print(f"🔍 Workspace IDs from EC2 Instances: {workspace_ids}")
-    print(f"🔍 Current AWS Account: {aws_account_id}")
-
-    # Debugging: Print out workspace details BEFORE filtering
     for ws in workspaces:
         workspace_id = ws["id"]
         workspace_name = ws["attributes"]["name"]
-        workspace_tags = ws["attributes"].get("tags", {})  # Fetch workspace tags
-        workspace_account = workspace_tags.get("account", "UNKNOWN")  # Extract AWS Account ID from tags
+        
+        # Extract AWS Account ID from tags instead of attributes
+        tags = ws["attributes"].get("tags", {})
+        workspace_account = tags.get("account", "UNKNOWN")
 
-        print(f"🧐 DEBUG: Checking Workspace: {workspace_id} (Name: {workspace_name})")
-        print(f"    - Tags: {workspace_tags}")
-        print(f"    - Extracted AWS Account ID: {workspace_account}")
+        print(f"🔍 Checking Workspace: {workspace_id} (Name: {workspace_name}, AWS Account: {workspace_account})")
 
         if workspace_id in workspace_ids:
-            print(f"✅ Match Found: Workspace ID {workspace_id} exists in EC2 instances.")
-
-            # Ensure AWS Account validation works
-            if workspace_account == f"aws-{aws_account_id}":
-                print(f"✅ Security Check Passed: Workspace {workspace_id} belongs to AWS Account {workspace_account}")
+            if workspace_account == aws_account_id:
+                print(f"✅ Matched Workspace: {workspace_id}")
                 matched_workspaces.append(workspace_id)
             else:
-                print(f"❌ Security Check Failed: Workspace {workspace_id} belongs to {workspace_account}, expected aws-{aws_account_id}")
+                print(f"❌ Security Check Failed: {workspace_id} belongs to {workspace_account}, expected {aws_account_id}, skipping.")
 
     print(f"🔹 Matched Workspaces (Valid): {matched_workspaces}")
     return matched_workspaces
+
 
 
 # Trigger Terraform Cloud Run
