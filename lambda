@@ -99,22 +99,34 @@ def find_matching_workspaces(api_token, org_name, workspace_ids, aws_account_id)
     workspaces = get_tf_workspaces(api_token, org_name)
     matched_workspaces = []
 
+    print(f"🔹 Expected AWS Account ID: {aws_account_id}")
+    print(f"🔹 Checking {len(workspaces)} workspaces from Terraform API...")
+
     for ws in workspaces:
         workspace_id = ws["id"]
         workspace_name = ws["attributes"]["name"]
         
-        # Extract AWS Account ID from tags instead of attributes
-        tags = ws["attributes"].get("tags", {})
-        workspace_account = tags.get("account", "UNKNOWN")
+        # Debugging: Print full workspace details
+        print(f"🔍 DEBUG: Checking Workspace: {workspace_id} (Name: {workspace_name})")
+        print(f"🔍 Full Attributes: {ws['attributes']}")
 
-        print(f"🔍 Checking Workspace: {workspace_id} (Name: {workspace_name}, AWS Account: {workspace_account})")
+        # Extract AWS account ID from Terraform API response
+        workspace_account = ws["attributes"].get("account-id", "UNKNOWN")
 
+        # If account-id is missing, check workspace tags
+        if workspace_account == "UNKNOWN":
+            workspace_tags = ws["attributes"].get("tags", {})
+            workspace_account = workspace_tags.get("account", "UNKNOWN")
+        
+        print(f"🔍 Extracted AWS Account ID: {workspace_account}")
+
+        # Security Check: Only match if AWS account ID matches
         if workspace_id in workspace_ids:
             if workspace_account == aws_account_id:
-                print(f"✅ Matched Workspace: {workspace_id}")
+                print(f"✅ Matched Workspace: {workspace_id} (Account: {workspace_account})")
                 matched_workspaces.append(workspace_id)
             else:
-                print(f"❌ Security Check Failed: {workspace_id} belongs to {workspace_account}, expected {aws_account_id}, skipping.")
+                print(f"❌ Security Check Failed: {workspace_id} belongs to {workspace_account}, expected {aws_account_id}. Skipping.")
 
     print(f"🔹 Matched Workspaces (Valid): {matched_workspaces}")
     return matched_workspaces
