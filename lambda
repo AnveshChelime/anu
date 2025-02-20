@@ -49,23 +49,26 @@ def get_workspace_ids(old_ami):
 
         for reservation in instances["Reservations"]:
             for instance in reservation["Instances"]:
-                tfc_wsid = None
-                for tag in instance.get("Tags", []):
-                    if tag["Key"] == "tfc_wsid":  
-                        tfc_wsid = tag["Value"]
-                        break  
+                instance_id = instance["InstanceId"]
+                launch_template = instance.get("LaunchTemplate", None)  # Check if a Launch Template exists
+                
+                # Extract tags
+                tags = {tag["Key"]: tag["Value"] for tag in instance.get("Tags", [])}
+                workspace_id = tags.get("tfc_wsid", None)
 
-                if tfc_wsid:
-                    print(f"✅ Found EC2 with tfc_wsid: {tfc_wsid}")
-                    workspace_ids.add(tfc_wsid)
-                else:
-                    print(f"⚠️ Skipping EC2 (Instance ID: {instance['InstanceId']}): No workspace ID tag found.")
-
+                # Security Check - Ensure instance was created by Terraform
+                if workspace_id:
+                    if launch_template:  # If it uses a launch template, it was likely Terraform-created
+                        workspace_ids.add(workspace_id)
+                    else:
+                        print(f"⚠️ EC2 Instance {instance_id} has tfc_wsid={workspace_id} but NO launch template. Skipping.")
+    
     except Exception as e:
         print(f"❌ Error fetching EC2 instances: {e}")
 
-    print(f"🔹 Total Workspace IDs Found: {workspace_ids}")
+    print(f"🔹 Found Workspace IDs: {workspace_ids}")
     return list(workspace_ids)
+
 
 # Get list of workspaces from Terraform Cloud
 def get_tf_workspaces(api_token, org_name):
